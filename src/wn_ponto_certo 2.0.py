@@ -36,13 +36,6 @@ LOGO_PATH = Path(__file__).parent.joinpath("wn_logo.png")
 # -------------------------
 # CONSTANTES E FUNÇÕES DE APOIO
 # -------------------------
-
-# Define a data de início de operação do sistema. Cálculos ignoram datas anteriores.
-SYSTEM_START_DATE = "2025-10-01"
-# Define a "data atual" para ser usada nos cálculos de recálculo diário.
-SYSTEM_CURRENT_DATE = datetime.now().date()
-
-
 MINUTOS_JORNADA_SEG_SEX = 8 * 60
 MINUTOS_JORNADA_SABADO = 4 * 60
 MINUTOS_UNIDADE_EXTRA = 4 * 60
@@ -84,7 +77,7 @@ def format_minutes_to_hms(minutes):
     minutes = abs(minutes)
     hours = int(minutes // 60)
     remaining_minutes = int(minutes % 60)
-    seconds = int(round((minutes * 60) % 60)) # Arredonda segundos
+    seconds = round((minutes * 60) % 60)
     if seconds == 60:
         remaining_minutes += 1
         seconds = 0
@@ -93,29 +86,6 @@ def format_minutes_to_hms(minutes):
         remaining_minutes = 0
     return f"{sign}{hours:02}:{remaining_minutes:02}:{seconds:02}"
 
-
-def parse_hhmm_to_minutes(time_str):
-    """Converte uma string HH:MM ou HH:MM:SS para minutos decimais."""
-    if not time_str or not re.match(r'^-?\d{1,4}:\d{2}(:\d{2})?$', time_str.strip()):
-        return 0
-
-    sign = -1 if time_str.startswith('-') else 1
-    time_str = time_str.lstrip('-')
-
-    parts = time_str.split(':')
-    minutes = 0
-    try:
-        if len(parts) == 2:
-            h, m = map(int, parts)
-            minutes = (h * 60 + m)
-        elif len(parts) == 3:
-            h, m, s = map(int, parts)
-            minutes = (h * 60 + m + s / 60.0)
-        return round(minutes * sign, 4)
-    except ValueError:
-        return 0
-
-# --- Classe DatabaseManager ---
 class DatabaseManager:
     def __init__(self, db_path=None):
         self.db_path = str(db_path if db_path else DEFAULT_DB)
@@ -127,47 +97,22 @@ class DatabaseManager:
 
     def create_database(self):
         c = self.conn.cursor()
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS funcionarios (
-                id INTEGER PRIMARY KEY,
-                matricula TEXT UNIQUE,
-                nome TEXT,
-                salario REAL DEFAULT 0,
-                banco_horas REAL DEFAULT 0,
-                extras_disponiveis INTEGER DEFAULT 0,
-                fichado INTEGER DEFAULT 0,
-                setor TEXT DEFAULT 'N/D',
-                banco_horas_inicial REAL DEFAULT 0,
-                extras_disponiveis_inicial INTEGER DEFAULT 0
-            )
-        """)
+        c.execute("CREATE TABLE IF NOT EXISTS funcionarios (id INTEGER PRIMARY KEY, matricula TEXT UNIQUE, nome TEXT, salario REAL DEFAULT 0, banco_horas REAL DEFAULT 0, extras_disponiveis INTEGER DEFAULT 0, fichado INTEGER DEFAULT 0, setor TEXT DEFAULT 'N/D')")
         c.execute("CREATE TABLE IF NOT EXISTS horas_trabalhadas (id INTEGER PRIMARY KEY, matricula TEXT, data TEXT, minutos_totais TEXT, periodos TEXT, criado_em DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(matricula, data))")
         c.execute("CREATE TABLE IF NOT EXISTS log_edicoes (id INTEGER PRIMARY KEY, matricula TEXT, data_ponto TEXT, data_edicao DATETIME DEFAULT CURRENT_TIMESTAMP, periodos_antigos TEXT, periodos_novos TEXT, justificativa TEXT, usuario TEXT DEFAULT 'SYSTEM/MANUAL')")
         c.execute("CREATE TABLE IF NOT EXISTS feriados (id INTEGER PRIMARY KEY, data TEXT UNIQUE, descricao TEXT, tipo TEXT)")
-        c.execute("CREATE TABLE IF NOT EXISTS feriados_recorrentes (id INTEGER PRIMARY KEY, dia INTEGER, mes INTEGER, descricao TEXT, tipo TEXT, UNIQUE(dia, mes))")
         c.execute("CREATE TABLE IF NOT EXISTS punicoes (id INTEGER PRIMARY KEY, matricula TEXT, data_punicao TEXT, minutos_descontados REAL DEFAULT 0, motivo TEXT, data_registro DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (matricula) REFERENCES funcionarios (matricula))")
         self.conn.commit()
 
     def populate_fixed_holidays(self):
-        fixed_holidays = [
-            (1, 1, 'Confraternização Universal', 'Nacional'),
-            (6, 3, 'Data Magna PE', 'Estadual'),
-            (21, 4, 'Tiradentes', 'Nacional'),
-            (1, 5, 'Dia Trabalhador', 'Nacional'),
-            (24, 6, 'São João', 'Estadual'),
-            (7, 9, 'Independência BR', 'Nacional'),
-            (12, 10, 'N Sra Aparecida', 'Nacional'),
-            (2, 11, 'Finados', 'Nacional'),
-            (15, 11, 'Proclamação República', 'Nacional'),
-            (25, 12, 'Natal', 'Nacional')
-        ]
+        ano_atual = str(datetime.now().year)
+        fixed_holidays = [(f'{ano_atual}-01-01','Confraternização Universal','Nacional'),(f'{ano_atual}-03-06','Data Magna PE','Estadual'),(f'{ano_atual}-04-21','Tiradentes','Nacional'),(f'{ano_atual}-05-01','Dia Trabalhador','Nacional'),(f'{ano_atual}-06-24','São João','Estadual'),(f'{ano_atual}-09-07','Independência BR','Nacional'),(f'{ano_atual}-10-12','N Sra Aparecida','Nacional'),(f'{ano_atual}-11-02','Finados','Nacional'),(f'{ano_atual}-11-15','Proclamação República','Nacional'),(f'{ano_atual}-12-25','Natal','Nacional')]
         try:
             c = self.conn.cursor()
-            query = "INSERT OR IGNORE INTO feriados_recorrentes (dia, mes, descricao, tipo) VALUES (?, ?, ?, ?)"
-            [c.execute(query, h) for h in fixed_holidays]
+            [c.execute("INSERT OR IGNORE INTO feriados (data, descricao, tipo) VALUES (?, ?, ?)", h) for h in fixed_holidays]
             self.conn.commit()
         except Exception as e:
-            print(f"Erro feriados recorrentes: {e}")
+            print(f"Erro feriados: {e}")
 
     def add_holiday(self, data_str, descricao, tipo):
         try:
@@ -175,111 +120,39 @@ class DatabaseManager:
             self.conn.commit()
             return True
         except Exception as e:
-            print(f"Erro add feriado específico: {e}")
-            return False
-
-    def add_recurring_holiday(self, dia, mes, descricao, tipo):
-        try:
-            self.conn.execute("INSERT OR REPLACE INTO feriados_recorrentes (dia, mes, descricao, tipo) VALUES (?, ?, ?, ?)", (dia, mes, descricao, tipo))
-            self.conn.commit()
-            return True
-        except Exception as e:
-            print(f"Erro add feriado recorrente: {e}")
-            return False
-
-    def get_all_specific_holidays(self):
-        c = self.conn.cursor()
-        c.execute("SELECT id, data, descricao, tipo FROM feriados WHERE data >= ? ORDER BY data", (SYSTEM_START_DATE,))
-        return [dict(row) for row in c.fetchall()]
-
-    def get_all_recurring_holidays(self):
-        c = self.conn.cursor()
-        c.execute("SELECT id, dia, mes, descricao, tipo FROM feriados_recorrentes ORDER BY mes, dia")
-        return [dict(row) for row in c.fetchall()]
-
-    def delete_specific_holiday(self, holiday_id):
-        try:
-            self.conn.execute("DELETE FROM feriados WHERE id = ?", (holiday_id,))
-            self.conn.commit()
-            return True
-        except Exception as e:
-            print(f"Erro ao deletar feriado específico: {e}")
-            return False
-
-    def delete_recurring_holiday(self, holiday_id):
-        try:
-            self.conn.execute("DELETE FROM feriados_recorrentes WHERE id = ?", (holiday_id,))
-            self.conn.commit()
-            return True
-        except Exception as e:
-            print(f"Erro ao deletar feriado recorrente: {e}")
+            print(f"Erro add feriado: {e}")
             return False
 
     def get_holidays_for_month(self, year, month):
         c = self.conn.cursor()
-        holiday_dates = set()
-
-        query_spec = "SELECT data FROM feriados WHERE strftime('%Y-%m', data) = ?"
+        query = "SELECT data FROM feriados WHERE strftime('%Y-%m', data) = ?"
         target_month = f"{year:04}-{month:02}"
-        c.execute(query_spec, (target_month,))
+        c.execute(query, (target_month,))
+        holiday_dates = set()
         [holiday_dates.add(datetime.strptime(row['data'], '%Y-%m-%d').date()) for row in c.fetchall() if row['data']]
-
-        query_rec = "SELECT dia FROM feriados_recorrentes WHERE mes = ?"
-        c.execute(query_rec, (month,))
-        for row in c.fetchall():
-            if row['dia']:
-                try:
-                    holiday_dates.add(date(year, month, row['dia']))
-                except ValueError:
-                    pass
-
         return holiday_dates
-
 
     def get_holidays_in_range(self, start_date, end_date):
         c = self.conn.cursor()
-        all_holidays = []
-
         start_date_str = start_date.isoformat() if isinstance(start_date, date) else start_date
         end_date_str = end_date.isoformat() if isinstance(end_date, date) else end_date
-        query_spec = "SELECT data, descricao, tipo FROM feriados WHERE data BETWEEN ? AND ? AND data >= ? ORDER BY data"
-        c.execute(query_spec, (start_date_str, end_date_str, SYSTEM_START_DATE))
-        all_holidays = [dict(row) for row in c.fetchall()]
-
-        query_rec = "SELECT dia, mes, descricao, tipo FROM feriados_recorrentes"
-        recurring = c.execute(query_rec).fetchall()
-
-        if recurring:
-            if isinstance(start_date, str):
-                start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
-            if isinstance(end_date, str):
-                end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
-
-            current_date_iter = start_date
-            while current_date_iter <= end_date:
-                for rec in recurring:
-                    if current_date_iter.day == rec['dia'] and current_date_iter.month == rec['mes']:
-                        if not any(h['data'] == current_date_iter.isoformat() for h in all_holidays):
-                            all_holidays.append({
-                                'data': current_date_iter.isoformat(),
-                                'descricao': rec['descricao'],
-                                'tipo': rec['tipo']
-                            })
-                current_date_iter += timedelta(days=1)
-
-        all_holidays.sort(key=lambda x: x['data'])
-        return all_holidays
+        query = "SELECT data, descricao, tipo FROM feriados WHERE data BETWEEN ? AND ? ORDER BY data"
+        c.execute(query, (start_date_str, end_date_str))
+        return [dict(row) for row in c.fetchall()]
 
     def add_punicao(self, matricula, data_punicao_str, minutos_descontados, motivo):
         try:
             with self.conn:
                 self.conn.execute("INSERT INTO punicoes (matricula, data_punicao, minutos_descontados, motivo) VALUES (?, ?, ?, ?)", (matricula, data_punicao_str, minutos_descontados, motivo))
-                self.log_edicao(matricula, data_punicao_str, "Punição: 0 min", f"Punição: {format_minutes_to_hms(minutos_descontados)}", f"Punição: {motivo}")
+                self.conn.execute("UPDATE funcionarios SET banco_horas = banco_horas - ? WHERE matricula = ?", (minutos_descontados, matricula))
+                info_apos = self.get_funcionario_info(matricula)
+                periodo_antigo = f"Punição: 0 min (BH antes: {format_minutes_to_hms(info_apos.get('banco_horas', 0) + minutos_descontados)})"
+                periodo_novo = f"Punição: {format_minutes_to_hms(minutos_descontados)} (BH depois: {format_minutes_to_hms(info_apos.get('banco_horas', 0))})"
+                self.log_edicao(matricula, data_punicao_str, periodo_antigo, periodo_novo, f"Punição: {motivo}")
             return True
         except Exception as e:
             print(f"Erro add punição: {e}")
             return False
-
 
     def get_total_punishment_minutes_for_day(self, matricula, data_str):
         c = self.conn.cursor()
@@ -292,80 +165,33 @@ class DatabaseManager:
         c = self.conn.cursor()
         start_date_str = start_date.isoformat() if isinstance(start_date, date) else start_date
         end_date_str = end_date.isoformat() if isinstance(end_date, date) else end_date
-        query = "SELECT data_punicao, minutos_descontados, motivo FROM punicoes WHERE matricula = ? AND data_punicao BETWEEN ? AND ? AND data_punicao >= ? ORDER BY data_punicao"
-        c.execute(query, (matricula, start_date_str, end_date_str, SYSTEM_START_DATE))
+        query = "SELECT data_punicao, minutos_descontados, motivo FROM punicoes WHERE matricula = ? AND data_punicao BETWEEN ? AND ? ORDER BY data_punicao"
+        c.execute(query, (matricula, start_date_str, end_date_str))
         return [dict(row) for row in c.fetchall()]
 
     def is_holiday(self, data_str):
         try:
             c = self.conn.cursor()
-
             c.execute("SELECT 1 FROM feriados WHERE data = ?", (data_str,))
-            if c.fetchone():
-                return True
-
-            try:
-                date_dt = datetime.strptime(data_str, "%Y-%m-%d").date()
-                c.execute("SELECT 1 FROM feriados_recorrentes WHERE dia = ? AND mes = ?", (date_dt.day, date_dt.month))
-                if c.fetchone():
-                    return True
-            except ValueError:
-                return False
-
-            return False
-        except Exception as e:
-            print(f"Erro ao checar feriado para {data_str}: {e}")
+            return c.fetchone() is not None
+        except:
             return False
 
-    def get_expected_daily_minutes(self, date_str, is_fichado): # Nome da variável estava correto aqui
-        """Retorna a carga horária esperada (débito) para um dia."""
+    def get_expected_daily_minutes(self, date_str, is_fichado):
+        is_holiday_today = self.is_holiday(date_str)
+        if is_holiday_today:
+            if is_fichado:
+                return 0
         try:
             date_dt = datetime.strptime(date_str, "%Y-%m-%d").date()
+            if date_dt.weekday() < 5: return MINUTOS_JORNADA_SEG_SEX
+            elif date_dt.weekday() == 5: return MINUTOS_JORNADA_SABADO
+            else: return 0
         except ValueError:
             return 0
 
-        # 1. Domingo sempre tem 0 horas esperadas para todos.
-        if date_dt.weekday() == 6:
-            return 0
-
-        # 2. Verifica se é feriado.
-        # --- CORREÇÃO DO NameError ---
-        is_holiday_today = self.is_holiday(date_str) # Usar date_str que é o parâmetro da função
-
-        # 3. Se for feriado E o funcionário for FICHADO, a expectativa é 0.
-        #    Para NÃO FICHADO, o feriado é tratado como dia normal (a função continua).
-        if is_holiday_today and is_fichado:
-            return 0
-
-        # 4. Para dias normais (ou feriados para não fichados):
-        if date_dt.weekday() < 5: # Seg-Sex
-            return MINUTOS_JORNADA_SEG_SEX
-        elif date_dt.weekday() == 5: # Sab
-            return MINUTOS_JORNADA_SABADO
-
-        return 0 # Segurança (nunca deve chegar aqui)
-
     def insert_funcionario(self, dados):
-        bh_inicial = dados.get("banco_horas_inicial", 0)
-        extras_inicial = dados.get("extras_disponiveis_inicial", 0)
-        bh_corrente = dados.get("banco_horas", bh_inicial)
-        extras_corrente = dados.get("extras_disponiveis", extras_inicial)
-
-        query = """
-            INSERT OR IGNORE INTO funcionarios
-            (matricula, nome, fichado, setor, banco_horas, extras_disponiveis, banco_horas_inicial, extras_disponiveis_inicial)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """
-        self.conn.execute(query, (
-            dados.get("matricula"),
-            dados.get("nome"),
-            dados.get("fichado", 0),
-            dados.get("setor", "N/D"),
-            bh_corrente,
-            extras_corrente,
-            bh_inicial,
-            extras_inicial
-        ))
+        self.conn.execute("INSERT OR IGNORE INTO funcionarios (matricula, nome, fichado, setor) VALUES (?, ?, ?, ?)", (dados.get("matricula"), dados.get("nome"), dados.get("fichado", 0), dados.get("setor", "N/D")))
         self.conn.commit()
 
     def insert_horas_trabalhadas(self, dados, justificativa="Importação Automática"):
@@ -419,15 +245,8 @@ class DatabaseManager:
         c = self.conn.cursor()
         start_date_str = start_date.isoformat() if isinstance(start_date, date) else start_date
         end_date_str = end_date.isoformat() if isinstance(end_date, date) else end_date
-        query = """
-            SELECT l.data_ponto, l.data_edicao, l.periodos_antigos, l.periodos_novos, l.justificativa, f.nome
-            FROM log_edicoes l JOIN funcionarios f ON l.matricula = f.matricula
-            WHERE l.matricula = ?
-              AND l.data_ponto BETWEEN ? AND ?
-              AND l.data_ponto >= ?
-            ORDER BY l.data_ponto, l.data_edicao
-        """
-        c.execute(query, (matricula, start_date_str, end_date_str, SYSTEM_START_DATE))
+        query = "SELECT l.data_ponto, l.data_edicao, l.periodos_antigos, l.periodos_novos, l.justificativa, f.nome FROM log_edicoes l JOIN funcionarios f ON l.matricula = f.matricula WHERE l.matricula = ? AND l.data_ponto BETWEEN ? AND ? ORDER BY l.data_ponto, l.data_edicao"
+        c.execute(query, (matricula, start_date_str, end_date_str))
         return [dict(row) for row in c.fetchall()]
 
     def _get_daily_summary_for_display(self, matricula, data_str):
@@ -437,14 +256,11 @@ class DatabaseManager:
         if not row: return "00:00:00", "00:00:00"
         total_worked, total_delay_minutes = row['minutos_totais'], 0
         try:
-            periods_json = json.loads(row['periodos']) if row['periodos'] else []
-            for p in periods_json:
-                total_delay_minutes += parse_hhmm_to_minutes(p.get('deducao_minutos', '00:00:00'))
-        except Exception as e:
-             print(f"Erro ao calcular dedução display para {matricula} em {data_str}: {e}")
-             pass
+            for p in json.loads(row['periodos']):
+                h, m, s = map(int, p['deducao_minutos'].split(':'))
+                total_delay_minutes += h * 60 + m + s / 60
+        except: pass
         return total_worked, format_minutes_to_hms(total_delay_minutes)
-
 
     def get_point_panorama(self, start_date, end_date, target_matricula=None):
         if not start_date or not end_date: return []
@@ -459,147 +275,71 @@ class DatabaseManager:
             start_dt = datetime.strptime(start_date_str, "%Y-%m-%d").date()
             end_dt = datetime.strptime(end_date_str, "%Y-%m-%d").date()
         except ValueError: return []
-
         matriculas_list = [f['matricula'] for f in funcionarios if f]
         if not matriculas_list: return []
-
         c = self.conn.cursor()
         placeholders = ','.join('?' for _ in matriculas_list)
-
-        sql_todos_horas = f"""
-            SELECT matricula, data, periodos, minutos_totais
-            FROM horas_trabalhadas
-            WHERE matricula IN ({placeholders}) AND data >= ?
-            ORDER BY data ASC
-        """
-        params = matriculas_list + [SYSTEM_START_DATE]
-        c.execute(sql_todos_horas, params)
+        sql_todos_horas = f"SELECT matricula, data, periodos, minutos_totais FROM horas_trabalhadas WHERE matricula IN ({placeholders}) ORDER BY data ASC"
+        c.execute(sql_todos_horas, matriculas_list)
         todos_os_dados_historicos = c.fetchall()
-
         panorama_final = []
-        start_sim_dt = datetime.strptime(SYSTEM_START_DATE, "%Y-%m-%d").date()
-
         for func_base in funcionarios:
             if not func_base: continue
             matricula = func_base['matricula']
             info_final_real = self.get_funcionario_info(matricula)
             is_fichado = info_final_real.get('fichado', 0) == 1
-
-            work_map = {}
+            saldo_bh_real_final = info_final_real.get('banco_horas', 0)
+            saldo_extras_real_final = info_final_real.get('extras_disponiveis', 0)
+            saldo_bh_simulado, saldo_extras_simulado = 0, 0
+            historico_simulado = {}
             dados_func = [r for r in todos_os_dados_historicos if r['matricula'] == matricula]
             for row in dados_func:
-                minutos_trabalhados = parse_hhmm_to_minutes(row['minutos_totais'])
-                work_map[row['data']] = {'minutos': minutos_trabalhados, 'periodos': row['periodos']}
-
-            saldo_bh_simulado = info_final_real.get('banco_horas_inicial', 0)
-            saldo_extras_simulado = info_final_real.get('extras_disponiveis_inicial', 0)
-            historico_simulado = {}
-
-            current_sim_iter = start_sim_dt
-            sim_end_dt = max(end_dt, SYSTEM_CURRENT_DATE)
-
-            while current_sim_iter <= sim_end_dt:
-                data_str = current_sim_iter.isoformat()
                 bh_anterior_simulado = saldo_bh_simulado
                 extras_anterior_simulado = saldo_extras_simulado
-
-                expected_minutes = self.get_expected_daily_minutes(data_str, is_fichado) # Chama a função corrigida
-
-                minutos_trabalhados_dia = work_map.get(data_str, {}).get('minutos', 0)
-                excedente_dia = minutos_trabalhados_dia - expected_minutes
-                saldo_bh_simulado += excedente_dia
-
-                while saldo_bh_simulado >= MINUTOS_UNIDADE_EXTRA:
-                    saldo_bh_simulado -= MINUTOS_UNIDADE_EXTRA
-                    saldo_extras_simulado += 1
-                while saldo_bh_simulado < 0 and saldo_extras_simulado > 0:
-                    saldo_bh_simulado += MINUTOS_UNIDADE_EXTRA
-                    saldo_extras_simulado -= 1
-
-                punicao_do_dia = self.get_total_punishment_minutes_for_day(matricula, data_str)
-                if punicao_do_dia > 0:
-                    saldo_bh_simulado -= punicao_do_dia
+                excedente_dia = 0
+                try:
+                    minutos_trabalhados = 0
+                    if row['minutos_totais'] and ':' in row['minutos_totais']:
+                        h, m, s = map(int, row['minutos_totais'].split(':'))
+                        minutos_trabalhados = h * 60 + m + s / 60
+                    excedente_dia = minutos_trabalhados - self.get_expected_daily_minutes(row['data'], is_fichado)
+                    saldo_bh_simulado += excedente_dia
+                    while saldo_bh_simulado >= MINUTOS_UNIDADE_EXTRA:
+                        saldo_bh_simulado -= MINUTOS_UNIDADE_EXTRA
+                        saldo_extras_simulado += 1
                     while saldo_bh_simulado < 0 and saldo_extras_simulado > 0:
                         saldo_bh_simulado += MINUTOS_UNIDADE_EXTRA
                         saldo_extras_simulado -= 1
-
-                historico_simulado[data_str] = {
-                    'bh_anterior': bh_anterior_simulado,
-                    'bh_saldo': saldo_bh_simulado,
-                    'extras_anterior': extras_anterior_simulado,
-                    'extras_saldo': saldo_extras_simulado
-                }
-                current_sim_iter += timedelta(days=1)
-
+                except: continue
+                historico_simulado[row['data']] = {'bh_anterior': bh_anterior_simulado, 'bh_saldo': saldo_bh_simulado, 'extras_anterior': extras_anterior_simulado, 'extras_saldo': saldo_extras_simulado}
+            bh_diff = saldo_bh_real_final - saldo_bh_simulado
+            extras_diff = saldo_extras_real_final - saldo_extras_simulado
             current_date_iter = start_dt
             while current_date_iter <= end_dt:
                 data_str = current_date_iter.isoformat()
-
-                dados_do_dia = work_map.get(data_str)
+                dados_do_dia = next((r for r in dados_func if r['data'] == data_str), None)
                 simulacao_do_dia = historico_simulado.get(data_str)
-
                 if not simulacao_do_dia:
-                    if current_date_iter < start_sim_dt:
-                        simulacao_do_dia = {
-                            'bh_anterior': info_final_real.get('banco_horas_inicial', 0),
-                            'bh_saldo': info_final_real.get('banco_horas_inicial', 0),
-                            'extras_anterior': info_final_real.get('extras_disponiveis_inicial', 0),
-                            'extras_saldo': info_final_real.get('extras_disponiveis_inicial', 0)
-                        }
+                    last_sim_date = max((d for d in historico_simulado if d < data_str), default=None)
+                    if last_sim_date:
+                        simulacao_do_dia = {'bh_anterior': historico_simulado[last_sim_date]['bh_saldo'], 'bh_saldo': historico_simulado[last_sim_date]['bh_saldo'],'extras_anterior': historico_simulado[last_sim_date]['extras_saldo'], 'extras_saldo': historico_simulado[last_sim_date]['extras_saldo']}
                     else:
-                        last_sim_date = max((d for d in historico_simulado if d < data_str), default=None)
-                        if last_sim_date:
-                            simulacao_do_dia = {
-                                'bh_anterior': historico_simulado[last_sim_date]['bh_saldo'],
-                                'bh_saldo': historico_simulado[last_sim_date]['bh_saldo'],
-                                'extras_anterior': historico_simulado[last_sim_date]['extras_saldo'],
-                                'extras_saldo': historico_simulado[last_sim_date]['extras_saldo']
-                            }
-                        else:
-                            simulacao_do_dia = {
-                                'bh_anterior': info_final_real.get('banco_horas_inicial', 0),
-                                'bh_saldo': info_final_real.get('banco_horas_inicial', 0),
-                                'extras_anterior': info_final_real.get('extras_disponiveis_inicial', 0),
-                                'extras_saldo': info_final_real.get('extras_disponiveis_inicial', 0)
-                            }
-
+                        simulacao_do_dia = {'bh_anterior': 0, 'bh_saldo': 0, 'extras_anterior': 0, 'extras_saldo': 0}
                 carga_horaria_dia_str, total_desconto, horarios = "00:00:00", "00:00:00", []
                 if dados_do_dia:
-                    carga_horaria_dia_str_temp, total_desconto_temp = self._get_daily_summary_for_display(matricula, data_str)
-                    carga_horaria_dia_str = carga_horaria_dia_str_temp
-                    total_desconto = total_desconto_temp
-
+                    carga_horaria_dia_str = dados_do_dia['minutos_totais']
+                    total_desconto = self._get_daily_summary_for_display(matricula, data_str)[1]
                     try:
-                        periods_json = json.loads(dados_do_dia['periodos']) if dados_do_dia['periodos'] else []
-                        for p in periods_json:
-                             entrada_str = p.get('entrada')
-                             saida_str = p.get('saida')
-                             if entrada_str:
-                                 horarios.append(datetime.strptime(entrada_str, '%Y-%m-%d %H:%M:%S').strftime('%H:%M'))
-                             if saida_str:
-                                 horarios.append(datetime.strptime(saida_str, '%Y-%m-%d %H:%M:%S').strftime('%H:%M'))
-                    except Exception as e:
-                        print(f"Erro ao processar períodos para {matricula} em {data_str}: {e}")
-                        pass
-
-                ponto_dict = {
-                    'Matricula': matricula, 'Nome': info_final_real['nome'], 'Data': data_str,
-                    'E1': '', 'S1': '', 'E2': '', 'S2': '',
-                    'Carga_Horaria': carga_horaria_dia_str,
-                    'Total_Desconto': total_desconto,
-                    'BH_Anterior': format_minutes_to_hms(simulacao_do_dia['bh_anterior']),
-                    'BH_Saldo': format_minutes_to_hms(simulacao_do_dia['bh_saldo']),
-                    'Extras_Disp': str(int(simulacao_do_dia['extras_saldo']))
-                }
-
+                        for p in json.loads(dados_do_dia['periodos']):
+                            horarios.extend([datetime.strptime(p['entrada'], '%Y-%m-%d %H:%M:%S').strftime('%H:%M'), datetime.strptime(p['saida'], '%Y-%m-%d %H:%M:%S').strftime('%H:%M')])
+                    except: pass
+                ponto_dict = {'Matricula': matricula, 'Nome': info_final_real['nome'], 'Data': data_str, 'E1': '', 'S1': '', 'E2': '', 'S2': '', 'Carga_Horaria': carga_horaria_dia_str, 'Total_Desconto': total_desconto, 'BH_Anterior': format_minutes_to_hms(simulacao_do_dia['bh_anterior'] + bh_diff), 'BH_Saldo': format_minutes_to_hms(simulacao_do_dia['bh_saldo'] + bh_diff), 'Extras_Disp': str(int(simulacao_do_dia['extras_saldo'] + extras_diff))}
                 if len(horarios) >= 1: ponto_dict['E1'] = horarios[0]
                 if len(horarios) >= 2: ponto_dict['S1'] = horarios[1]
                 if len(horarios) >= 3: ponto_dict['E2'] = horarios[2]
                 if len(horarios) >= 4: ponto_dict['S2'] = horarios[3]
                 panorama_final.append(ponto_dict)
-
                 current_date_iter += timedelta(days=1)
-
         panorama_final.sort(key=lambda x: (x['Nome'], x['Data']))
         return panorama_final
 
@@ -607,19 +347,18 @@ class DatabaseManager:
         c = self.conn.cursor()
         start_date_str = start_date.isoformat() if isinstance(start_date, date) else start_date
         end_date_str = end_date.isoformat() if isinstance(end_date, date) else end_date
-
+        
         query = """
-            SELECT data
-            FROM horas_trabalhadas
-            WHERE matricula = ?
-              AND data BETWEEN ? AND ?
-              AND data >= ?
-              AND minutos_totais IS NOT NULL
+            SELECT data 
+            FROM horas_trabalhadas 
+            WHERE matricula = ? 
+              AND data BETWEEN ? AND ? 
+              AND minutos_totais IS NOT NULL 
               AND minutos_totais != '00:00:00'
             ORDER BY data
         """
-        c.execute(query, (matricula, start_date_str, end_date_str, SYSTEM_START_DATE))
-
+        c.execute(query, (matricula, start_date_str, end_date_str))
+        
         worked_dates = []
         for row in c.fetchall():
             try:
@@ -633,153 +372,69 @@ class DatabaseManager:
             info_antes = self.get_funcionario_info(matricula)
             saldo_bh_antes = info_antes.get('banco_horas', 0)
             saldo_extras_antes = info_antes.get('extras_disponiveis', 0)
-
-            novo_saldo_bh = saldo_bh_antes - minutos_a_deduzir_bh
-            novo_saldo_extras = saldo_extras_antes - unidades_a_deduzir_extras
-
-            self.conn.execute("UPDATE funcionarios SET banco_horas = ?, extras_disponiveis = ? WHERE matricula = ?", (novo_saldo_bh, novo_saldo_extras, matricula))
+            self.conn.execute("UPDATE funcionarios SET banco_horas = banco_horas - ?, extras_disponiveis = extras_disponiveis - ? WHERE matricula = ?", (minutos_a_deduzir_bh, unidades_a_deduzir_extras, matricula))
             self.conn.commit()
-
             data_hoje = datetime.now().strftime("%Y-%m-%d")
             justificativa = "Pagamento/Dedução Saldo"
             periodo_antigo = f"BH: {format_minutes_to_hms(saldo_bh_antes)}, Extras: {int(saldo_extras_antes)}"
-            periodo_novo = f"BH: {format_minutes_to_hms(novo_saldo_bh)}, Extras: {int(novo_saldo_extras)}"
+            periodo_novo = f"BH: {format_minutes_to_hms(saldo_bh_antes - minutos_a_deduzir_bh)}, Extras: {int(saldo_extras_antes - unidades_a_deduzir_extras)}"
             self.log_edicao(matricula, data_hoje, periodo_antigo, periodo_novo, justificativa)
-
             return True
         except Exception as e:
             print(f"Erro update saldos: {e}")
             return False
 
-
     def recalculate_full_balance_for_employee(self, matricula):
         c = self.conn.cursor()
         func_info = self.get_funcionario_info(matricula)
-        # Se funcionário não for encontrado, não faz nada
-        if not func_info:
-             print(f"AVISO: Funcionário com matrícula {matricula} não encontrado para recálculo.")
-             return
-
         is_fichado = func_info.get('fichado', 0) == 1
-
-        saldo_bh_minutos = func_info.get('banco_horas_inicial', 0)
-        saldo_extras = func_info.get('extras_disponiveis_inicial', 0)
-
-        c.execute("SELECT data, minutos_totais FROM horas_trabalhadas WHERE matricula = ? AND data >= ? ORDER BY data ASC", (matricula, SYSTEM_START_DATE))
+        c.execute("SELECT data, minutos_totais FROM horas_trabalhadas WHERE matricula = ? ORDER BY data ASC", (matricula,))
         all_work_days = c.fetchall()
-
-        work_map = {}
+        saldo_bh_minutos, saldo_extras = 0, 0
         for day in all_work_days:
-            minutos_trabalhados = parse_hhmm_to_minutes(day['minutos_totais'])
-            work_map[day['data']] = minutos_trabalhados
-
-        try:
-            start_dt = datetime.strptime(SYSTEM_START_DATE, "%Y-%m-%d").date()
-            end_dt = SYSTEM_CURRENT_DATE
-        except ValueError:
-            print(f"Erro ao parsear datas de início/fim em recalculate para {matricula}")
-            return
-
-        if start_dt > end_dt:
-             self.conn.execute("UPDATE funcionarios SET banco_horas = ?, extras_disponiveis = ? WHERE matricula = ?", (saldo_bh_minutos, saldo_extras, matricula))
-             self.conn.commit()
-             return
-
-        current_date_iter = start_dt
-        while current_date_iter <= end_dt:
-            data_str = current_date_iter.isoformat()
-
-            expected_minutes = self.get_expected_daily_minutes(data_str, is_fichado) # Chama a função corrigida
-
-            minutos_trabalhados_dia = work_map.get(data_str, 0)
-            excedente_dia = minutos_trabalhados_dia - expected_minutes
-            saldo_bh_minutos += excedente_dia
-
-            while saldo_bh_minutos >= MINUTOS_UNIDADE_EXTRA:
-                saldo_bh_minutos -= MINUTOS_UNIDADE_EXTRA
-                saldo_extras += 1
-            while saldo_bh_minutos < 0 and saldo_extras > 0:
-                saldo_bh_minutos += MINUTOS_UNIDADE_EXTRA
-                saldo_extras -= 1
-
-            current_date_iter += timedelta(days=1)
-
-        c.execute("SELECT SUM(minutos_descontados) as total_punicao FROM punicoes WHERE matricula = ? AND data_punicao >= ?", (matricula, SYSTEM_START_DATE))
+            excedente_dia = 0
+            try:
+                minutos_trabalhados = 0
+                if day['minutos_totais'] and ':' in day['minutos_totais']:
+                    h, m, s = map(int, day['minutos_totais'].split(':'))
+                    minutos_trabalhados = h * 60 + m + s / 60
+                excedente_dia = minutos_trabalhados - self.get_expected_daily_minutes(day['data'], is_fichado)
+                saldo_bh_minutos += excedente_dia
+                while saldo_bh_minutos >= MINUTOS_UNIDADE_EXTRA:
+                    saldo_bh_minutos -= MINUTOS_UNIDADE_EXTRA
+                    saldo_extras += 1
+                while saldo_bh_minutos < 0 and saldo_extras > 0:
+                    saldo_bh_minutos += MINUTOS_UNIDADE_EXTRA
+                    saldo_extras -= 1
+            except Exception as e:
+                print(f"Erro ao calcular excedente dia {day['data']} para {matricula}: {e}")
+                continue
+        c.execute("SELECT SUM(minutos_descontados) as total_punicao FROM punicoes WHERE matricula = ?", (matricula,))
         punicao_total = c.fetchone()['total_punicao'] or 0
         saldo_bh_minutos -= punicao_total
-        while saldo_bh_minutos < 0 and saldo_extras > 0:
-             saldo_bh_minutos += MINUTOS_UNIDADE_EXTRA
-             saldo_extras -= 1
-
-        c.execute("SELECT periodos_antigos, periodos_novos FROM log_edicoes WHERE matricula = ? AND justificativa = 'Pagamento/Dedução Saldo' AND data_ponto >= ?", (matricula, SYSTEM_START_DATE))
-        logs_pagamento = c.fetchall()
-
-        total_extras_pagos = 0
-        total_bh_pagos = 0 # (Não implementado, mas para futuro)
-
-        for log in logs_pagamento:
-            try:
-                antigo_str = log['periodos_antigos']
-                novo_str = log['periodos_novos']
-
-                # Extrai "Extras: X"
-                extras_antigo_match = re.search(r'Extras: (\-?\d+)', antigo_str)
-                extras_novo_match = re.search(r'Extras: (\-?\d+)', novo_str)
-
-                if extras_antigo_match and extras_novo_match:
-                    extras_antigo = int(extras_antigo_match.group(1))
-                    extras_novo = int(extras_novo_match.group(1))
-                    total_extras_pagos += (extras_antigo - extras_novo)
-
-            except Exception as e:
-                print(f"Erro ao parsear log de pagamento para recálculo: {e}")
-
-        saldo_extras -= total_extras_pagos
-
-        while saldo_extras < 0:
-             saldo_extras += 1
-             saldo_bh_minutos -= MINUTOS_UNIDADE_EXTRA
-
         self.conn.execute("UPDATE funcionarios SET banco_horas = ?, extras_disponiveis = ? WHERE matricula = ?", (saldo_bh_minutos, saldo_extras, matricula))
         self.conn.commit()
 
 
-# --- Função import_glog_txt ---
 def import_glog_txt(filepath, db_manager, logger=print):
     employees_points_raw = defaultdict(lambda: defaultdict(list))
     unique_employees = set()
     try:
         with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f.readlines()[1:]: # Pula cabeçalho
+            for line in f.readlines()[1:]:
                 parts = re.split(r'\s+', line.strip())
                 if len(parts) < 8: continue
                 try:
-                    # Tenta extrair matrícula, nome, data e hora
-                    matricula = str(parts[2]).zfill(8)
-                    nome = str(parts[3]).strip()
-                    # Verifica se data e hora estão presentes
-                    if len(parts) >= 8 and parts[6] and parts[7]:
-                        dt_str = f"{parts[6]} {parts[7]}"
-                        dt = try_parse_datetime(dt_str)
-                        if dt:
-                            if dt.date() < datetime.strptime(SYSTEM_START_DATE, "%Y-%m-%d").date():
-                                continue # Ignora datas anteriores ao início
-                            unique_employees.add((matricula, nome))
-                            employees_points_raw[matricula][dt.date().isoformat()].append({"datetime": dt})
-                        else:
-                            logger(f"AVISO: Formato de data/hora inválido na linha: {line.strip()}")
-                    else:
-                        logger(f"AVISO: Dados de data/hora ausentes na linha: {line.strip()}")
-                except IndexError:
-                     logger(f"AVISO: Linha com formato inesperado (IndexError): {line.strip()}")
-                except Exception as e:
-                     logger(f"AVISO: Erro ao processar linha: {line.strip()} - Erro: {e}")
-                     continue
+                    matricula, nome = str(parts[2]).zfill(8), str(parts[3]).strip()
+                    dt = try_parse_datetime(f"{parts[6]} {parts[7]}")
+                    if dt:
+                        unique_employees.add((matricula, nome))
+                        employees_points_raw[matricula][dt.date().isoformat()].append({"datetime": dt})
+                except: continue
     except Exception as e:
         logger(f"ERRO LEITURA ARQUIVO: {e}")
         return [], set()
-
-    logger(f"Funcionários detectados no arquivo: {len(unique_employees)}")
+    logger(f"Funcionários detectados: {len(unique_employees)}")
     existing_matriculas = db_manager.get_all_funcionarios_matriculas()
     new_employees_list = []
     processed_matriculas_in_file = set()
@@ -787,60 +442,32 @@ def import_glog_txt(filepath, db_manager, logger=print):
         processed_matriculas_in_file.add(matricula)
         if matricula not in existing_matriculas:
             new_employees_list.append((matricula, nome))
-
     for matricula, dias in sorted(employees_points_raw.items()):
         func_info = db_manager.get_funcionario_info(matricula)
-        sector = func_info.get('setor', 'N/D') if func_info else 'N/D'
-
+        sector = func_info.get('setor', 'N/D')
         for data, pontos_brutos in sorted(dias.items()):
-            if data < SYSTEM_START_DATE:
-                continue
-
             pontos_brutos.sort(key=lambda x: x["datetime"])
             periodos_trabalhados, minutos_trabalhados_decimal = [], 0
             horarios_sequenciais = [p["datetime"] for p in pontos_brutos]
-
             if len(horarios_sequenciais) % 2 != 0:
-                logger(f"AVISO: {matricula} {data}: Número ímpar de batidas ({len(horarios_sequenciais)}). Última batida ignorada.")
+                logger(f"AVISO: {matricula} {data}: Batidas ímpares.")
                 horarios_sequenciais.pop()
-
             for i in range(0, len(horarios_sequenciais), 2):
                 entrada, saida = horarios_sequenciais[i], horarios_sequenciais[i+1]
-
-                if saida < entrada:
-                   logger(f"AVISO: {matricula} {data}: Saída ({saida}) anterior à entrada ({entrada}). Ignorando período.")
-                   continue
-
                 turno = "Manhã" if i == 0 else "Tarde"
                 jornada_inicio = datetime.strptime(f"{data} {'07:30' if turno == 'Manhã' else '13:00'}", "%Y-%m-%d %H:%M")
-
+                if saida < entrada: saida += timedelta(days=1)
                 minutes_late = max(0, (entrada - jornada_inicio).total_seconds() / 60)
                 delay_deduction_minutes = calculate_deduction(minutes_late, sector)
                 duration_minutes_bruto = (saida - entrada).total_seconds() / 60
                 duration_minutes_liquido = max(0, duration_minutes_bruto - delay_deduction_minutes)
                 minutos_trabalhados_decimal += duration_minutes_liquido
-                periodos_trabalhados.append({
-                    "entrada": str(entrada), "saida": str(saida),
-                    "minutos_brutos": format_minutes_to_hms(duration_minutes_bruto),
-                    "deducao_minutos": format_minutes_to_hms(delay_deduction_minutes),
-                    "minutos_liquidos": format_minutes_to_hms(duration_minutes_liquido)
-                })
-
+                periodos_trabalhados.append({"entrada": str(entrada), "saida": str(saida), "minutos_brutos": format_minutes_to_hms(duration_minutes_bruto), "deducao_minutos": format_minutes_to_hms(delay_deduction_minutes), "minutos_liquidos": format_minutes_to_hms(duration_minutes_liquido)})
             if periodos_trabalhados:
-                db_manager.insert_horas_trabalhadas({
-                    "matricula": matricula,
-                    "data": data,
-                    "minutos_totais": format_minutes_to_hms(minutos_trabalhados_decimal),
-                    "periodos": periodos_trabalhados
-                })
-            elif len(horarios_sequenciais) > 0:
-                logger(f"AVISO: {matricula} {data}: Nenhuns períodos de trabalho válidos formados a partir das batidas.")
-
-
+                db_manager.insert_horas_trabalhadas({"matricula": matricula, "data": data, "minutos_totais": format_minutes_to_hms(minutos_trabalhados_decimal), "periodos": periodos_trabalhados})
     return new_employees_list, processed_matriculas_in_file
 
 
-# --- Classe DateRangePicker ---
 class DateRangePicker:
     """Um widget de calendário reutilizável que seleciona um intervalo de datas."""
     def __init__(self, parent, bg_color, style_colors):
@@ -848,21 +475,14 @@ class DateRangePicker:
         self.selected_start_date = None
         self.selected_end_date = None
         self.selecting_start = True
-
+        
         self.style_colors = style_colors
 
-        try:
-            min_date = datetime.strptime(SYSTEM_START_DATE, "%Y-%m-%d").date()
-        except:
-            min_date = None
-
-        self.cal = Calendar(self.frame, selectmode="day", date_pattern="yyyy-mm-dd", locale='pt_BR',
+        self.cal = Calendar(self.frame, selectmode="day", date_pattern="yyyy-mm-dd", locale='pt_BR', 
                             background=style_colors['ACCENT_COLOR'], foreground="white", headersbackground=style_colors['ACCENT_COLOR'],
                             normalbackground=style_colors['LIGHT_BG'], weekendbackground="#172a45",
                             othermonthbackground=style_colors['BG_COLOR'], othermonthforeground="#6a7b9d",
-                            selectbackground=style_colors['ACCENT_COLOR'],
-                            mindate=min_date)
-
+                            selectbackground=style_colors['ACCENT_COLOR'])
         self.cal.pack(side=tk.LEFT, padx=(0, 20))
         self.cal.bind("<<CalendarSelected>>", self._on_calendar_click)
 
@@ -895,7 +515,7 @@ class DateRangePicker:
         if self.selected_end_date:
             self.cal.calevent_create(self.selected_end_date, 'Fim', tags='end_date')
             self.lbl_end.config(text=self.selected_end_date.strftime("%d/%m/%Y"))
-
+            
             if self.selected_start_date and self.selected_start_date < self.selected_end_date:
                 current_date = self.selected_start_date + timedelta(days=1)
                 while current_date < self.selected_end_date:
@@ -909,16 +529,8 @@ class DateRangePicker:
             clicked_date = self.cal.selection_get()
         except tk.TclError:
             return
-
+            
         if not clicked_date: return
-
-        try:
-            min_date = datetime.strptime(SYSTEM_START_DATE, "%Y-%m-%d").date()
-            if clicked_date < min_date:
-                clicked_date = min_date
-                self.cal.selection_set(clicked_date)
-        except:
-            pass
 
         if self.selecting_start:
             self.selected_start_date = clicked_date
@@ -930,14 +542,13 @@ class DateRangePicker:
             self.selecting_start = True
             if self.selected_start_date and self.selected_end_date and self.selected_end_date < self.selected_start_date:
                 self.selected_start_date, self.selected_end_date = self.selected_end_date, self.selected_start_date
-
+        
         self._update_calendar_tags()
-
+    
     def get_dates(self):
         return self.selected_start_date, self.selected_end_date
+        
 
-
-# --- Classe App ---
 class App:
     def __init__(self, root):
         self.db = DatabaseManager()
@@ -946,34 +557,19 @@ class App:
         self.root.title("WN Ponto Certo")
         self.root.configure(bg="#0a192f")
         self.root.minsize(1200, 700)
-
-        try:
-            self.selected_start_date = max(date.today().replace(day=1), datetime.strptime(SYSTEM_START_DATE, "%Y-%m-%d").date())
-        except:
-            self.selected_start_date = date.today().replace(day=1)
-
+        self.selected_start_date = date.today()
         self.selected_end_date = date.today()
-
         self.selecting_start = True
         self.unsaved_edits = {}
         self.editing_widgets = {}
         self.setup_styles()
         self.setup_ui()
 
-        if hasattr(self, 'main_calendar'):
-            # Define as datas iniciais e força a atualização do panorama
-            self.main_calendar.selection_set(self.selected_start_date)
-            self.on_calendar_click()
-            self.main_calendar.selection_set(self.selected_end_date)
-            self.on_calendar_click() # Chama load_point_viewer aqui
-
-        self.root.protocol("WM_DELETE_WINDOW", self.on_app_close)
-
     def setup_styles(self):
         style = ttk.Style()
         style.theme_use('clam')
         self.BG_COLOR="#0a192f"; self.FG_COLOR="#ccd6f6"; self.LIGHT_BG="#112240"; self.ACCENT_COLOR="#008080"; self.HIGHLIGHT_COLOR="#40E0D0"; self.START_DATE_COLOR="#2ca3a3"; self.END_DATE_COLOR="#1f5f5f"; self.RANGE_BG_COLOR="#1a3b5c"; self.HOLIDAY_COLOR="#FF8C00"
-
+        
         self.style_colors_dict = {
             'BG_COLOR': self.BG_COLOR, 'FG_COLOR': self.FG_COLOR, 'LIGHT_BG': self.LIGHT_BG,
             'ACCENT_COLOR': self.ACCENT_COLOR, 'HIGHLIGHT_COLOR': self.HIGHLIGHT_COLOR,
@@ -984,8 +580,6 @@ class App:
         style.configure('.', background=self.BG_COLOR, foreground=self.FG_COLOR, font=('Segoe UI', 10))
         style.configure('TButton', font=('Segoe UI', 10, 'bold'), background=self.ACCENT_COLOR, foreground='white', borderwidth=0, focusthickness=0, padding=8)
         style.map('TButton', background=[('active', '#006666')])
-        style.configure('Delete.TButton', font=('Segoe UI', 10, 'bold'), background='#b30000', foreground='white', borderwidth=0, focusthickness=0, padding=8)
-        style.map('Delete.TButton', background=[('active', '#800000')])
         style.configure("Treeview", rowheight=25, fieldbackground=self.LIGHT_BG, background=self.LIGHT_BG, foreground=self.FG_COLOR)
         style.configure("Treeview.Heading", font=('Segoe UI', 10, 'bold'), background=self.ACCENT_COLOR, foreground='white')
         style.map("Treeview.Heading", background=[('active', self.ACCENT_COLOR)])
@@ -1002,23 +596,21 @@ class App:
         style.configure('DateRange.TLabel', background=self.RANGE_BG_COLOR, foreground=self.FG_COLOR)
         style.configure('StartDate.TLabel', background=self.START_DATE_COLOR, foreground='white', font=('Segoe UI', 10, 'bold'))
         style.configure('EndDate.TLabel', background=self.END_DATE_COLOR, foreground='white', font=('Segoe UI', 10, 'bold'))
-        style.configure('TCheckbutton', background=self.BG_COLOR, foreground=self.FG_COLOR, indicatorcolor=self.ACCENT_COLOR, font=('Segoe UI', 10))
-        style.map('TCheckbutton',
-                  indicatorcolor=[('selected', self.HIGHLIGHT_COLOR), ('active', self.ACCENT_COLOR)],
-                  background=[('active', self.BG_COLOR)])
 
-
+    # AJUSTE 3: Modificação do Layout Principal (setup_ui)
     def setup_ui(self):
         main_frame = tk.Frame(self.root, bg="#0a192f")
         main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        
+        # Configura as colunas e linhas do main_frame
+        main_frame.grid_rowconfigure(1, weight=1) # Linha 1 (Panorama e Log) vai expandir
+        main_frame.grid_columnconfigure(0, weight=3) # Col 0 (Panorama) 75%
+        main_frame.grid_columnconfigure(1, weight=1) # Col 1 (Log) 25%
 
-        main_frame.grid_rowconfigure(1, weight=1)
-        main_frame.grid_columnconfigure(0, weight=3)
-        main_frame.grid_columnconfigure(1, weight=1)
-
+        # --- Top Frame (Linha 0, Colspan 2) ---
         top_frame = tk.Frame(main_frame, bg="#0a192f")
         top_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
-
+        
         header_frame = tk.Frame(top_frame, bg="#0a192f")
         header_frame.pack(fill=tk.X)
         try:
@@ -1031,7 +623,7 @@ class App:
             print(f"ERRO logo: {e}")
         app_title = tk.Label(header_frame, text="WN Ponto Certo", font=("Segoe UI", 20, "bold"), fg="white", bg="#0a192f")
         app_title.pack(side=tk.LEFT)
-
+        
         actions_frame = tk.Frame(top_frame, bg="#0a192f")
         actions_frame.pack(fill=tk.X, pady=(10,0))
         ttk.Button(actions_frame, text="📂 Importar", command=self.on_import, style='TButton').pack(side=tk.LEFT, padx=(0, 10))
@@ -1040,30 +632,16 @@ class App:
         ttk.Button(actions_frame, text="💰 Pagar Saldo", command=self.on_extra_payment, style='TButton').pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(actions_frame, text=" Punição", command=self.on_add_punishment, style='TButton').pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(actions_frame, text="📄 Exportar Log", command=self.on_export_log, style='TButton').pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Button(actions_frame, text="🚪 Sair", command=self.on_app_close, style='TButton').pack(side=tk.RIGHT)
-
+        ttk.Button(actions_frame, text="🚪 Sair", command=self.root.quit, style='TButton').pack(side=tk.RIGHT)
+        
+        # --- Log Frame (Linha 1, Col 1) ---
         log_frame = ttk.LabelFrame(main_frame, text=" Log ", style='TLabelframe')
         log_frame.grid(row=1, column=1, sticky="nsew", pady=5, padx=(5, 0))
         self.log_area = scrolledtext.ScrolledText(log_frame, bg="#112240", fg="#a8b2d1", insertbackground="white", font=("Consolas", 9), relief=tk.FLAT, borderwidth=5)
         self.log_area.pack(fill=tk.BOTH, expand=True)
-
+        
+        # --- Panorama Frame (Linha 1, Col 0) ---
         self.setup_point_viewer(main_frame)
-
-    def on_app_close(self):
-        if self.unsaved_edits:
-            answer = messagebox.askyesnocancel("Alterações Não Salvas",
-                                             "Você possui alterações não salvas.\nDeseja salvar antes de sair?",
-                                             icon='warning')
-            if answer is None: # Cancel
-                return
-            elif answer is True: # Yes
-                self.append_log("Salvando alterações antes de sair...")
-                self.commit_all_changes(from_exit=True)
-                self.root.destroy()
-            else: # No
-                self.root.destroy()
-        else:
-            self.root.destroy()
 
     def on_import(self):
         filepath = filedialog.askopenfilename(title="Selecione o arquivo TXT", filetypes=[("Text files", "*.txt"), ("All files", "*.*")])
@@ -1079,102 +657,41 @@ class App:
                 self.append_log("Cadastro concluído.")
             if processed_matriculas:
                 self.append_log(f"Recalculando saldos para {len(processed_matriculas)} funcionários...")
-                recalc_errors = 0
                 for matricula in processed_matriculas:
-                    try:
-                        self.db.recalculate_full_balance_for_employee(matricula)
-                    except Exception as e:
-                        self.append_log(f"ERRO ao recalcular saldo para {matricula}: {e}")
-                        recalc_errors += 1
-                if recalc_errors == 0:
-                    self.append_log("Saldos recalculados.")
-                else:
-                    self.append_log(f"Recálculo concluído com {recalc_errors} erro(s). Verifique o log.")
-
+                    self.db.recalculate_full_balance_for_employee(matricula)
+                self.append_log("Saldos recalculados.")
             self.append_log("Importação concluída ✅")
             self.update_employee_filter()
             self.load_point_viewer(force_reload=True)
             self._update_calendar_tags()
-        except NameError as ne:
-             self.append_log(f"Erro importação: {ne}. A função 'import_glog_txt' não foi encontrada.")
-             messagebox.showerror("Erro de Código", f"Erro interno: {ne}\nA função 'import_glog_txt' pode estar faltando no código.")
         except Exception as e:
             self.append_log(f"Erro importação: {e}")
             messagebox.showerror("Erro", str(e))
 
-
     def prompt_for_new_employee_details(self, matricula, nome):
-        win = tk.Toplevel(self.root); win.title("Novo Funcionário")
-        win.configure(bg=self.BG_COLOR); win.state('zoomed'); win.minsize(600, 500)
-        win.transient(self.root); win.grab_set()
-
-        main_frame = tk.Frame(win, bg=self.BG_COLOR)
-        main_frame.pack(expand=True)
-
-        frame_form = tk.Frame(main_frame, bg=self.BG_COLOR); frame_form.pack(padx=20, pady=20, fill="both", expand=True)
+        win = tk.Toplevel(self.root); win.title("Novo Funcionário"); win.geometry("500x300"); win.configure(bg=self.BG_COLOR); win.resizable(False, False); win.transient(self.root); win.grab_set()
+        frame_form = tk.Frame(win, bg=self.BG_COLOR); frame_form.pack(padx=20, pady=20, fill="both", expand=True)
         tk.Label(frame_form, text="Complete o cadastro:", bg=self.BG_COLOR, fg=self.HIGHLIGHT_COLOR, font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 10)); tk.Label(frame_form, text=f"Matrícula: {matricula}", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(anchor="w"); tk.Label(frame_form, text=f"Nome: {nome}", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(anchor="w", pady=(0, 20))
-
         frame_fichado = tk.Frame(frame_form, bg=self.BG_COLOR); frame_fichado.pack(fill='x', pady=5); tk.Label(frame_fichado, text="É Fichado?", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 10, "bold"), width=15, anchor='w').pack(side=tk.LEFT); cmb_fichado = ttk.Combobox(frame_fichado, values=LISTA_FICHADO, state="readonly", width=20); cmb_fichado.pack(side=tk.LEFT); cmb_fichado.set("Sim")
-
         frame_setor = tk.Frame(frame_form, bg=self.BG_COLOR); frame_setor.pack(fill='x', pady=5); tk.Label(frame_setor, text="Setor:", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 10, "bold"), width=15, anchor='w').pack(side=tk.LEFT); cmb_setor = ttk.Combobox(frame_setor, values=LISTA_SETORES, state="readonly", width=20); cmb_setor.pack(side=tk.LEFT); cmb_setor.set("Produtivo")
-
-        frame_bh = tk.Frame(frame_form, bg=self.BG_COLOR); frame_bh.pack(fill='x', pady=5); tk.Label(frame_bh, text="BH Inicial (HH:MM):", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 10, "bold"), width=15, anchor='w').pack(side=tk.LEFT); entry_bh_inicial = ttk.Entry(frame_bh, width=22); entry_bh_inicial.pack(side=tk.LEFT); entry_bh_inicial.insert(0, "00:00")
-
-        frame_extras = tk.Frame(frame_form, bg=self.BG_COLOR); frame_extras.pack(fill='x', pady=5); tk.Label(frame_extras, text="Extras Iniciais (Un):", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 10, "bold"), width=15, anchor='w').pack(side=tk.LEFT); entry_extras_inicial = ttk.Entry(frame_extras, width=22); entry_extras_inicial.pack(side=tk.LEFT); entry_extras_inicial.insert(0, "0")
-
         def save_new_employee():
             fichado_str = cmb_fichado.get(); setor = cmb_setor.get();
             if not fichado_str or not setor: messagebox.showerror("Erro", "Campos obrigatórios.", parent=win); return
-
-            bh_inicial_str = entry_bh_inicial.get()
-            extras_inicial_str = entry_extras_inicial.get()
-
-            bh_minutos = parse_hhmm_to_minutes(bh_inicial_str)
-            try:
-                extras_int = int(extras_inicial_str)
-            except ValueError:
-                messagebox.showerror("Erro", "Valor de Extras Iniciais inválido. Use apenas números.", parent=win)
-                return
-
-            fichado_val = 1 if fichado_str == "Sim" else 0
-            dados = {
-                "matricula": matricula,
-                "nome": nome,
-                "fichado": fichado_val,
-                "setor": setor,
-                "banco_horas_inicial": bh_minutos,
-                "extras_disponiveis_inicial": extras_int,
-                "banco_horas": bh_minutos,
-                "extras_disponiveis": extras_int
-            }
-
-            try:
-                self.db.insert_funcionario(dados);
-                self.append_log(f"Funcionário {nome} ({matricula}) cadastrado com BH: {format_minutes_to_hms(bh_minutos)} e Extras: {extras_int}.");
-                win.destroy()
-            except Exception as e:
-                messagebox.showerror("Erro", f"Não foi possível salvar: {e}", parent=win)
-
+            fichado_val = 1 if fichado_str == "Sim" else 0; dados = {"matricula": matricula, "nome": nome, "fichado": fichado_val, "setor": setor}
+            try: self.db.insert_funcionario(dados); self.append_log(f"Funcionário {nome} ({matricula}) cadastrado."); win.destroy()
+            except Exception as e: messagebox.showerror("Erro", f"Não foi possível salvar: {e}", parent=win)
         btn_salvar = ttk.Button(frame_form, text="✅ Salvar", style='TButton', command=save_new_employee); btn_salvar.pack(pady=20)
-        ttk.Button(frame_form, text="Sair", style='Delete.TButton', command=win.destroy).pack(pady=5)
-
         self.root.wait_window(win)
 
     def on_edit_employee(self):
-        win = tk.Toplevel(self.root); win.title("Editar Dados Cadastrais")
-        win.configure(bg=self.BG_COLOR); win.state('zoomed'); win.minsize(800, 600)
-        win.resizable(False, False); win.transient(self.root); win.grab_set()
-
+        win = tk.Toplevel(self.root); win.title("Editar Dados Cadastrais"); win.geometry("600x600"); win.configure(bg=self.BG_COLOR); win.resizable(False, False); win.transient(self.root); win.grab_set()
         selected_matricula = tk.StringVar(); main_frame = tk.Frame(win, bg=self.BG_COLOR, padx=20, pady=20); main_frame.pack(fill=tk.BOTH, expand=True)
-
-        ttk.Button(main_frame, text="Sair", style='Delete.TButton', command=win.destroy, width=10).pack(anchor='e', pady=(0,10))
-
         tree_frame = ttk.LabelFrame(main_frame, text=" Selecione um funcionário", style='TLabelframe'); tree_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15)); tree_frame.grid_rowconfigure(0, weight=1); tree_frame.grid_columnconfigure(0, weight=1)
         columns = ("Matrícula", "Nome", "Fichado", "Setor"); employee_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="browse")
         v_scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=employee_tree.yview); h_scroll = ttk.Scrollbar(tree_frame, orient="horizontal", command=employee_tree.xview)
         employee_tree.configure(yscrollcommand=v_scroll.set, xscrollcommand=h_scroll.set); employee_tree.grid(row=0, column=0, sticky='nsew'); v_scroll.grid(row=0, column=1, sticky='ns'); h_scroll.grid(row=1, column=0, sticky='ew')
         col_widths = {"Matrícula": 100, "Nome": 250, "Fichado": 80, "Setor": 120}; [employee_tree.heading(col, text=col) or employee_tree.column(col, width=col_widths.get(col, 100), anchor=tk.W, stretch=tk.YES if col=="Nome" else tk.NO) for col in columns]
-        edit_frame = ttk.LabelFrame(main_frame, text=" Editar Informações", style='TLabelframe'); edit_frame.pack(fill=tk.X, pady=10)
+        edit_frame = ttk.LabelFrame(main_frame, text=" Editar Informações", style='TLabelframe'); edit_frame.pack(fill=tk.X)
         frame_fichado = tk.Frame(edit_frame, bg=self.BG_COLOR); frame_fichado.pack(fill='x', pady=5, anchor='w', padx=10); tk.Label(frame_fichado, text="É Fichado?", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 10, "bold"), width=15, anchor='w').pack(side=tk.LEFT); cmb_fichado = ttk.Combobox(frame_fichado, values=LISTA_FICHADO, state="readonly", width=20); cmb_fichado.pack(side=tk.LEFT, padx=5)
         frame_setor = tk.Frame(edit_frame, bg=self.BG_COLOR); frame_setor.pack(fill='x', pady=5, anchor='w', padx=10); tk.Label(frame_setor, text="Setor:", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 10, "bold"), width=15, anchor='w').pack(side=tk.LEFT); cmb_setor = ttk.Combobox(frame_setor, values=LISTA_SETORES, state="readonly", width=20); cmb_setor.pack(side=tk.LEFT, padx=5)
         btn_salvar = ttk.Button(edit_frame, text="✅ Salvar Alterações", width=30, style='TButton', state="disabled"); btn_salvar.pack(pady=15)
@@ -1193,351 +710,68 @@ class App:
             if not matricula: messagebox.showerror("Erro", "Funcionário não selecionado.", parent=win); return
             fichado_str = cmb_fichado.get(); setor = cmb_setor.get(); fichado_val = 1 if fichado_str == "Sim" else 0; selected_items = employee_tree.selection(); nome_func = employee_tree.item(selected_items[0], 'values')[1] if selected_items else ""
             if messagebox.askyesno("Confirmar", f"Atualizar {nome_func} ({matricula})?", parent=win):
-                info_antes = self.db.get_funcionario_info(matricula)
-                if self.db.update_employee_details(matricula, fichado_val, setor):
-                    messagebox.showinfo("Sucesso", "Dados atualizados!", parent=win)
-                    refresh_employee_list()
-                    employee_tree.selection_remove(employee_tree.selection())
-                    selected_matricula.set(""); cmb_fichado.set(""); cmb_setor.set(""); btn_salvar.config(state="disabled")
-                    if info_antes.get('fichado') != fichado_val or info_antes.get('setor') != setor:
-                        try:
-                            self.db.recalculate_full_balance_for_employee(matricula)
-                            self.append_log(f"Recalculando saldo para {matricula} devido à alteração cadastral.")
-                        except Exception as e:
-                            self.append_log(f"ERRO ao recalcular saldo para {matricula} após alteração: {e}")
-                            messagebox.showerror("Erro Recálculo", f"Erro ao recalcular saldo para {matricula}:\n{e}", parent=win)
-                    self.load_point_viewer(force_reload=True)
-                else:
-                    messagebox.showerror("Erro", "Não foi possível salvar.", parent=win)
+                if self.db.update_employee_details(matricula, fichado_val, setor): messagebox.showinfo("Sucesso", "Dados atualizados!", parent=win); refresh_employee_list(); employee_tree.selection_remove(employee_tree.selection()); selected_matricula.set(""); cmb_fichado.set(""); cmb_setor.set(""); btn_salvar.config(state="disabled")
+                else: messagebox.showerror("Erro", "Não foi possível salvar.", parent=win)
         btn_salvar.config(command=save_changes); refresh_employee_list()
 
     def on_add_punishment(self):
-        win = tk.Toplevel(self.root); win.title("Adicionar Punição")
-        win.configure(bg=self.BG_COLOR);
-        win.state('zoomed'); win.minsize(600, 700)
-        win.resizable(False, False); win.transient(self.root); win.grab_set()
-
-        main_frame = tk.Frame(win, bg=self.BG_COLOR)
-        main_frame.pack(expand=True)
-
-        form_frame = tk.Frame(main_frame, bg=self.BG_COLOR, padx=20, pady=20)
-        form_frame.pack(fill=tk.BOTH, expand=True)
-
-        ttk.Button(form_frame, text="Sair", style='Delete.TButton', command=win.destroy, width=10).pack(anchor='e', pady=(0,10))
-
-        tk.Label(form_frame, text="1. Func:", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5)); nomes = [f"{f['matricula']} - {f['nome']}" for f in self.db.get_all_funcionarios()]; cmb_func = ttk.Combobox(form_frame, values=nomes, state="readonly", width=50); cmb_func.pack(anchor="w", pady=(0, 15))
-
-        try:
-            min_date = datetime.strptime(SYSTEM_START_DATE, "%Y-%m-%d").date()
-        except:
-            min_date = None
-
-        tk.Label(form_frame, text="2. Data:", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5)); cal_punicao = Calendar(form_frame, selectmode="day", date_pattern="yyyy-mm-dd", locale='pt_BR', background="#008080", foreground="white", headersbackground="#008080", mindate=min_date); cal_punicao.pack(anchor="w", pady=(0, 15))
-        tk.Label(form_frame, text="3. Tempo (HH:MM):", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5)); entry_tempo = ttk.Entry(form_frame, width=15); entry_tempo.pack(anchor="w", pady=(0, 15))
-        tk.Label(form_frame, text="4. Motivo:", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5)); entry_motivo = ttk.Entry(form_frame, width=50); entry_motivo.pack(anchor="w", fill="x", pady=(0, 20))
-
+        win = tk.Toplevel(self.root); win.title("Adicionar Punição"); win.geometry("550x550"); win.configure(bg=self.BG_COLOR); win.resizable(False, False); win.transient(self.root); win.grab_set()
+        main_frame = tk.Frame(win, bg=self.BG_COLOR, padx=20, pady=20); main_frame.pack(fill=tk.BOTH, expand=True)
+        tk.Label(main_frame, text="1. Func:", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5)); nomes = [f"{f['matricula']} - {f['nome']}" for f in self.db.get_all_funcionarios()]; cmb_func = ttk.Combobox(main_frame, values=nomes, state="readonly", width=50); cmb_func.pack(anchor="w", pady=(0, 15))
+        tk.Label(main_frame, text="2. Data:", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5)); cal_punicao = Calendar(main_frame, selectmode="day", date_pattern="yyyy-mm-dd", locale='pt_BR', background="#008080", foreground="white", headersbackground="#008080"); cal_punicao.pack(anchor="w", pady=(0, 15))
+        tk.Label(main_frame, text="3. Tempo (HH:MM):", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5)); entry_tempo = ttk.Entry(main_frame, width=15); entry_tempo.pack(anchor="w", pady=(0, 15))
+        tk.Label(main_frame, text="4. Motivo:", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5)); entry_motivo = ttk.Entry(main_frame, width=50); entry_motivo.pack(anchor="w", fill="x", pady=(0, 20))
         def save_punishment():
-             selection = cmb_func.get();
-             if not selection: messagebox.showerror("Erro", "Funcionário não selecionado.", parent=win); return
-             matricula = selection.split(" - ")[0]; nome_func = " ".join(selection.split(" - ")[1:])
-             data_str = cal_punicao.get_date(); tempo_str = entry_tempo.get().strip(); motivo = entry_motivo.get().strip()
-
-             if data_str < SYSTEM_START_DATE:
-                 messagebox.showerror("Erro", f"Não é possível registrar punições antes de {SYSTEM_START_DATE}.", parent=win)
-                 return
-
-             if not tempo_str: messagebox.showerror("Erro", "Tempo obrigatório.", parent=win); return
-             if not motivo: messagebox.showerror("Erro", "Motivo obrigatório.", parent=win); return
-
-             minutos_descontados = parse_hhmm_to_minutes(tempo_str)
-             if minutos_descontados == 0:
-                  messagebox.showerror("Erro", "Formato de tempo inválido (use HH:MM) ou tempo é zero.", parent=win); return
-             if minutos_descontados < 0:
-                 minutos_descontados = abs(minutos_descontados)
-
-             confirm_msg = (f"Confirmar {format_minutes_to_hms(minutos_descontados)} para {nome_func}\nData: {datetime.strptime(data_str, '%Y-%m-%d').strftime('%d/%m/%Y')}?\nMotivo: {motivo}\n\nATENÇÃO: A punição será registrada e o saldo recalculado.")
-             if messagebox.askyesno("Confirmar Punição", confirm_msg, parent=win):
-                 if self.db.add_punicao(matricula, data_str, minutos_descontados, motivo):
-                     messagebox.showinfo("Sucesso", "Punição registrada! O saldo será recalculado.", parent=win)
-                     self.append_log(f"PUNIÇÃO REGISTRADA: {matricula} - {data_str} - {format_minutes_to_hms(minutos_descontados)} - {motivo}")
-                     cmb_func.set(''); entry_tempo.delete(0, 'end'); entry_motivo.delete(0, 'end')
-                     try:
-                         self.db.recalculate_full_balance_for_employee(matricula)
-                         self.append_log(f"Recalculando saldo para {matricula} após registro de punição.")
-                     except Exception as e:
-                         self.append_log(f"ERRO ao recalcular saldo para {matricula} após punição: {e}")
-                         messagebox.showerror("Erro Recálculo", f"Erro ao recalcular saldo para {matricula}:\n{e}", parent=win)
-                     self.load_point_viewer(force_reload=True);
-                     self._update_calendar_tags()
-                 else: messagebox.showerror("Erro", "Não foi possível salvar a punição.", parent=win)
-
-        btn_salvar_punicao = ttk.Button(form_frame, text="✅ Registrar Punição", style='TButton', command=save_punishment); btn_salvar_punicao.pack()
+            selection = cmb_func.get();
+            if not selection: messagebox.showerror("Erro", "Funcionário não selecionado.", parent=win); return
+            matricula = selection.split(" - ")[0]; nome_func = " ".join(selection.split(" - ")[1:])
+            data_str = cal_punicao.get_date(); tempo_str = entry_tempo.get().strip(); motivo = entry_motivo.get().strip()
+            if not tempo_str: messagebox.showerror("Erro", "Tempo obrigatório.", parent=win); return
+            if not motivo: messagebox.showerror("Erro", "Motivo obrigatório.", parent=win); return
+            minutos_descontados = 0
+            if re.match(r'^\d{1,3}:\d{2}$', tempo_str):
+                try: h, m = map(int, tempo_str.split(':')); minutos_descontados = h * 60 + m
+                except: messagebox.showerror("Erro", "Tempo inválido HH:MM.", parent=win); return
+            elif re.match(r'^\d{1,3}:\d{2}:\d{2}$', tempo_str):
+                try: h, m, s = map(int, tempo_str.split(':')); minutos_descontados = h * 60 + m + s / 60.0
+                except: messagebox.showerror("Erro", "Tempo inválido HH:MM:SS.", parent=win); return
+            else: messagebox.showerror("Erro", "Formato HH:MM.", parent=win); return
+            if minutos_descontados <= 0: messagebox.showerror("Erro", "Tempo > 0.", parent=win); return
+            confirm_msg = (f"Confirmar {format_minutes_to_hms(minutos_descontados)} para {nome_func}\nData: {datetime.strptime(data_str, '%Y-%m-%d').strftime('%d/%m/%Y')}?\nMotivo: {motivo}\n\nDesconto IMEDIATO do BH.")
+            if messagebox.askyesno("Confirmar Punição", confirm_msg, parent=win):
+                if self.db.add_punicao(matricula, data_str, minutos_descontados, motivo): messagebox.showinfo("Sucesso", "Punição registrada e BH atualizado!", parent=win); self.append_log(f"PUNIÇÃO: {matricula} - {data_str} - {format_minutes_to_hms(minutos_descontados)} - {motivo}"); cmb_func.set(''); entry_tempo.delete(0, 'end'); entry_motivo.delete(0, 'end'); self.load_point_viewer(force_reload=True); self._update_calendar_tags()
+                else: messagebox.showerror("Erro", "Não foi possível salvar.", parent=win)
+        btn_salvar_punicao = ttk.Button(main_frame, text="✅ Salvar Punição e Descontar BH", style='TButton', command=save_punishment); btn_salvar_punicao.pack()
 
     def on_manage_holidays(self):
-        win = tk.Toplevel(self.root)
-        win.title("Gerenciar Feriados")
-        win.configure(bg=self.BG_COLOR)
-        win.state('zoomed'); win.minsize(1024, 768)
-        win.resizable(False, False); win.transient(self.root); win.grab_set()
-
-        main_frame = tk.Frame(win, bg=self.BG_COLOR, padx=20, pady=20)
-        main_frame.pack(fill=tk.BOTH, expand=True)
-
-        form_frame = ttk.LabelFrame(main_frame, text=" Adicionar/Editar Feriado ", style='TLabelframe')
-        form_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
-
-        try:
-            min_date = datetime.strptime(SYSTEM_START_DATE, "%Y-%m-%d").date()
-        except:
-            min_date = None
-
-        tk.Label(form_frame, text="1. Data:", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(10, 5), padx=10)
-        cal_feriado = Calendar(form_frame, selectmode="day", date_pattern="yyyy-mm-dd", locale='pt_BR',
-                               background="#008080", foreground="white", headersbackground="#008080",
-                               mindate=min_date)
-        cal_feriado.pack(anchor="w", pady=(0, 15), padx=10)
-
-        tk.Label(form_frame, text="2. Descrição:", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5), padx=10)
-        entry_descricao = ttk.Entry(form_frame, width=30)
-        entry_descricao.pack(anchor="w", fill="x", pady=(0, 15), padx=10)
-
-        tk.Label(form_frame, text="3. Tipo:", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5), padx=10)
-        cmb_tipo = ttk.Combobox(form_frame, values=LISTA_TIPO_FERIADO, state="readonly", width=28)
-        cmb_tipo.pack(anchor="w", padx=10)
-        cmb_tipo.set("Municipal")
-
-        chk_recorrente_var = tk.IntVar()
-        chk_recorrente = ttk.Checkbutton(form_frame, text="Recorrente (todo ano)", variable=chk_recorrente_var, style='TCheckbutton')
-        chk_recorrente.pack(anchor='w', padx=10, pady=10)
-
-        btn_save = ttk.Button(form_frame, text="✅ Salvar (Novo/Editar)", style='TButton')
-        btn_save.pack(pady=10, padx=10, fill=tk.X)
-
-        btn_clear = ttk.Button(form_frame, text="Limpar Formulário", style='TButton')
-        btn_clear.pack(pady=5, padx=10, fill=tk.X)
-
-        btn_delete = ttk.Button(form_frame, text="🗑️ Remover Selecionado", style='Delete.TButton')
-        btn_delete.pack(pady=(15, 5), padx=10, fill=tk.X)
-
-        ttk.Button(form_frame, text="Sair", style='Delete.TButton', command=win.destroy).pack(side=tk.BOTTOM, pady=10, padx=10, fill=tk.X)
-
-        list_frame = ttk.LabelFrame(main_frame, text=" Feriados Cadastrados ", style='TLabelframe')
-        list_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        list_frame.grid_rowconfigure(0, weight=1)
-        list_frame.grid_columnconfigure(0, weight=1)
-
-        tree_columns = ("Data", "Descrição", "Tipo", "Recorrente")
-        tree_feriados = ttk.Treeview(list_frame, columns=tree_columns, show="headings", selectmode="browse")
-
-        v_scroll = ttk.Scrollbar(list_frame, orient="vertical", command=tree_feriados.yview)
-        h_scroll = ttk.Scrollbar(list_frame, orient="horizontal", command=tree_feriados.xview)
-        tree_feriados.configure(yscrollcommand=v_scroll.set, xscrollcommand=h_scroll.set)
-
-        tree_feriados.grid(row=0, column=0, sticky='nsew')
-        v_scroll.grid(row=0, column=1, sticky='ns')
-        h_scroll.grid(row=1, column=0, sticky='ew')
-
-        col_widths = {"Data": 100, "Descrição": 200, "Tipo": 100, "Recorrente": 80}
-        for col in tree_columns:
-            anchor = tk.W if col == "Descrição" else tk.CENTER
-            tree_feriados.heading(col, text=col)
-            tree_feriados.column(col, width=col_widths.get(col, 100), anchor=anchor, stretch=tk.YES if col == "Descrição" else tk.NO)
-
-        def clear_form():
-            cal_feriado.selection_set(date.today())
-            entry_descricao.delete(0, tk.END)
-            cmb_tipo.set("Municipal")
-            chk_recorrente_var.set(0)
-            if tree_feriados.selection():
-                tree_feriados.selection_remove(tree_feriados.selection())
-
-        def refresh_holiday_list():
-            [tree_feriados.delete(i) for i in tree_feriados.get_children()]
-
-            spec_list = self.db.get_all_specific_holidays()
-            for i, h in enumerate(spec_list):
-                try:
-                    data_fmt = datetime.strptime(h['data'], '%Y-%m-%d').strftime('%d/%m/%Y')
-                except:
-                    data_fmt = h['data']
-                values = (data_fmt, h['descricao'], h['tipo'], "Não")
-                iid = f"spec_{h['id']}"
-                tag = 'evenrow' if i % 2 == 0 else 'oddrow'
-                tree_feriados.insert("", "end", values=values, iid=iid, tags=(tag,))
-
-            rec_list = self.db.get_all_recurring_holidays()
-            for i, h in enumerate(rec_list):
-                data_fmt = f"{h['dia']:02}/{h['mes']:02}"
-                values = (data_fmt, h['descricao'], h['tipo'], "Sim")
-                iid = f"rec_{h['id']}"
-                tag = 'evenrow' if (i + len(spec_list)) % 2 == 0 else 'oddrow'
-                tree_feriados.insert("", "end", values=values, iid=iid, tags=(tag,))
-
-        def on_holiday_select(event=None):
-            selected_items = tree_feriados.selection()
-            if not selected_items:
-                return
-
-            iid = selected_items[0]
-            item_data = tree_feriados.item(iid, 'values')
-
-            descricao, tipo, is_rec_str = item_data[1], item_data[2], item_data[3]
-
-            entry_descricao.delete(0, tk.END)
-            entry_descricao.insert(0, descricao)
-            cmb_tipo.set(tipo)
-
-            if is_rec_str == "Sim":
-                chk_recorrente_var.set(1)
-                dia_str, mes_str = item_data[0].split('/')
-                try:
-                    current_year = cal_feriado.get_displayed_month()[1]
-                    data_dt = date(current_year, int(mes_str), int(dia_str))
-                    cal_feriado.selection_set(data_dt)
-                except ValueError:
-                    try:
-                       data_dt = date(current_year + 1, int(mes_str), int(dia_str))
-                       cal_feriado.selection_set(data_dt)
-                    except:
-                       pass
-            else:
-                chk_recorrente_var.set(0)
-                try:
-                    data_dt = datetime.strptime(item_data[0], '%d/%m/%Y').date()
-                    cal_feriado.selection_set(data_dt)
-                except:
-                    pass
-
+        win = tk.Toplevel(self.root); win.title("Gerenciar Feriados"); win.geometry("550x480"); win.configure(bg=self.BG_COLOR); win.resizable(False, False); win.transient(self.root); win.grab_set()
+        main_frame = tk.Frame(win, bg=self.BG_COLOR, padx=20, pady=20); main_frame.pack(fill=tk.BOTH, expand=True)
+        tk.Label(main_frame, text="1. Data:", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5)); cal_feriado = Calendar(main_frame, selectmode="day", date_pattern="yyyy-mm-dd", locale='pt_BR', background="#008080", foreground="white", headersbackground="#008080"); cal_feriado.pack(anchor="w", pady=(0, 15))
+        tk.Label(main_frame, text="2. Descrição:", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5)); entry_descricao = ttk.Entry(main_frame, width=50); entry_descricao.pack(anchor="w", fill="x", pady=(0, 15))
+        tk.Label(main_frame, text="3. Tipo:", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5)); cmb_tipo = ttk.Combobox(main_frame, values=LISTA_TIPO_FERIADO, state="readonly", width=48); cmb_tipo.pack(anchor="w"); cmb_tipo.set("Municipal")
         def save_holiday():
-            try:
-                data_dt = cal_feriado.selection_get()
-            except:
-                messagebox.showerror("Erro", "Data inválida.", parent=win)
-                return
-
-            desc = entry_descricao.get().strip()
-            tipo = cmb_tipo.get()
-            is_rec = chk_recorrente_var.get() == 1
-
-            if not desc or not tipo:
-                messagebox.showerror("Erro", "Descrição e Tipo são obrigatórios.", parent=win)
-                return
-
-            if not is_rec and data_dt < datetime.strptime(SYSTEM_START_DATE, "%Y-%m-%d").date():
-                messagebox.showerror("Erro", f"Não é possível registrar feriados específicos antes de {SYSTEM_START_DATE}.", parent=win)
-                return
-
-            selected_iid = tree_feriados.selection()
-            if selected_iid:
-                iid = selected_iid[0]
-                if iid.startswith('spec_'):
-                    self.db.delete_specific_holiday(iid.split('_')[1])
-                elif iid.startswith('rec_'):
-                    self.db.delete_recurring_holiday(iid.split('_')[1])
-
-            success = False
-            if is_rec:
-                if self.db.add_recurring_holiday(data_dt.day, data_dt.month, desc, tipo):
-                    self.append_log(f"FERIADO RECORRENTE: {data_dt.day}/{data_dt.month} - {desc} salvo.")
-                    success = True
-                else:
-                    messagebox.showerror("Erro", "Não foi possível salvar o feriado recorrente.", parent=win)
-            else:
-                if self.db.add_holiday(data_dt.isoformat(), desc, tipo):
-                     self.append_log(f"FERIADO: {data_dt.isoformat()} - {desc} salvo.")
-                     success = True
-                else:
-                    messagebox.showerror("Erro", "Não foi possível salvar o feriado específico.", parent=win)
-
-            if success:
-                refresh_holiday_list()
-                clear_form()
-                messagebox.showinfo("Recalculando", "Feriado salvo. Os saldos de todos os funcionários serão recalculados. Isso pode demorar.", parent=win)
-                self.append_log("Recalculando saldos devido a alteração de feriado...");
-                recalc_errors = 0
-                all_employees = self.db.get_all_funcionarios()
-                for emp in all_employees:
-                    try:
-                        self.db.recalculate_full_balance_for_employee(emp['matricula'])
-                    except Exception as e:
-                        self.append_log(f"ERRO ao recalcular saldo para {emp['matricula']} após salvar feriado: {e}")
-                        recalc_errors += 1
-                if recalc_errors == 0:
-                    self.append_log("Recálculo completo.")
-                    messagebox.showinfo("Concluído", "Saldos recalculados.", parent=win)
-                else:
-                    self.append_log(f"Recálculo concluído com {recalc_errors} erro(s). Verifique o log.")
-                    messagebox.showwarning("Atenção", f"Recálculo concluído com {recalc_errors} erro(s).\nVerifique o log para mais detalhes.", parent=win)
-
-                self._update_calendar_tags()
-                self.load_point_viewer(force_reload=True)
-
-        def delete_holiday():
-            selected_iid = tree_feriados.selection()
-            if not selected_iid:
-                messagebox.showerror("Erro", "Nenhum feriado selecionado.", parent=win)
-                return
-
-            iid = selected_iid[0]
-            item_data = tree_feriados.item(iid, 'values')
-            desc = item_data[1]
-
-            if not messagebox.askyesno("Confirmar Remoção", f"Tem certeza que deseja remover o feriado '{desc}'?", parent=win):
-                return
-
-            success = False
-            if iid.startswith('spec_'):
-                success = self.db.delete_specific_holiday(iid.split('_')[1])
-            elif iid.startswith('rec_'):
-                success = self.db.delete_recurring_holiday(iid.split('_')[1])
-
-            if success:
-                self.append_log(f"FERIADO REMOVIDO: {desc}")
-                refresh_holiday_list()
-                clear_form()
-                messagebox.showinfo("Recalculando", "Feriado removido. Os saldos de todos os funcionários serão recalculados. Isso pode demorar.", parent=win)
-                self.append_log("Recalculando saldos...");
-                recalc_errors = 0
-                all_employees = self.db.get_all_funcionarios()
-                for emp in all_employees:
-                    try:
-                        self.db.recalculate_full_balance_for_employee(emp['matricula'])
-                    except Exception as e:
-                       self.append_log(f"ERRO ao recalcular saldo para {emp['matricula']} após remover feriado: {e}")
-                       recalc_errors += 1
-                if recalc_errors == 0:
-                    self.append_log("Recálculo completo.")
-                    messagebox.showinfo("Concluído", "Saldos recalculados.", parent=win)
-                else:
-                    self.append_log(f"Recálculo concluído com {recalc_errors} erro(s). Verifique o log.")
-                    messagebox.showwarning("Atenção", f"Recálculo concluído com {recalc_errors} erro(s).\nVerifique o log para mais detalhes.", parent=win)
-
-                self._update_calendar_tags()
-                self.load_point_viewer(force_reload=True)
-            else:
-                messagebox.showerror("Erro", "Não foi possível remover o feriado.", parent=win)
-
-        btn_save.config(command=save_holiday)
-        btn_clear.config(command=clear_form)
-        btn_delete.config(command=delete_holiday)
-        tree_feriados.bind("<<TreeviewSelect>>", on_holiday_select)
-
-        refresh_holiday_list()
-
+            data_str = cal_feriado.get_date(); descricao = entry_descricao.get().strip(); tipo = cmb_tipo.get()
+            if not descricao: messagebox.showerror("Erro", "Descrição obrigatória.", parent=win); return
+            if not tipo: messagebox.showerror("Erro", "Tipo obrigatório.", parent=win); return
+            if self.db.add_holiday(data_str, descricao, tipo):
+                messagebox.showinfo("Sucesso", f"Feriado '{descricao}' {data_str} salvo!", parent=win); self.append_log(f"FERIADO: {data_str} - {descricao} ({tipo})"); entry_descricao.delete(0, 'end'); cmb_tipo.set("Municipal")
+                if messagebox.askyesno("Recalcular Saldos", "Feriado salvo. Recalcular saldo de todos os funcionários para aplicar a nova regra?"):
+                    self.append_log("Recalculando saldos devido a novo feriado..."); [self.db.recalculate_full_balance_for_employee(emp['matricula']) for emp in self.db.get_all_funcionarios()]; self.append_log("Recálculo completo."); messagebox.showinfo("Concluído", "Saldos recalculados.")
+                self._update_calendar_tags(); self.load_point_viewer(force_reload=True)
+            else: messagebox.showerror("Erro", "Não foi possível salvar.", parent=win)
+        btn_salvar = ttk.Button(main_frame, text="✅ Salvar Feriado", style='TButton', command=save_holiday); btn_salvar.pack(pady=20)
 
     def on_extra_payment(self, *args):
         win = tk.Toplevel(self.root)
         win.title("Pagamento e Saldos")
+        win.geometry("700x750")
         win.configure(bg=self.BG_COLOR)
-        win.state('zoomed'); win.minsize(800, 800)
         win.resizable(False, True)
         win.transient(self.root)
         win.grab_set()
 
         main_frame = tk.Frame(win, bg=self.BG_COLOR, padx=20, pady=20)
         main_frame.pack(fill=tk.BOTH, expand=True)
-
-        ttk.Button(main_frame, text="Sair", style='Delete.TButton', command=win.destroy, width=10).pack(anchor='e', pady=(0,10))
 
         tk.Label(main_frame, text="1. Selecione o Funcionário:", bg=self.BG_COLOR, fg=self.HIGHLIGHT_COLOR, font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 5))
         nomes = [f"{f['matricula']} - {f['nome']}" for f in self.db.get_all_funcionarios()]
@@ -1562,7 +796,7 @@ class App:
             data_vars["nao_fichado_info"].clear()
 
         def is_sunday_or_holiday(date_obj):
-            if date_obj.weekday() == 6:
+            if date_obj.weekday() == 6: 
                 return True
             if self.db.is_holiday(date_obj.isoformat()):
                 return True
@@ -1579,7 +813,7 @@ class App:
                 story = []
 
                 style_title = styles['h1']
-                style_title.alignment = 1
+                style_title.alignment = 1 
                 style_title.textColor = colors.teal
 
                 if LOGO_PATH.exists():
@@ -1604,9 +838,9 @@ class App:
                     total_extras = payment_details['extras_qty'] * payment_details['extras_valor']
                     total_pago += total_extras
                     table_data.append([
-                        'Pagamento de Extras',
-                        f"{payment_details['extras_qty']} un.",
-                        f"{payment_details['extras_valor']:.2f}",
+                        'Pagamento de Extras', 
+                        f"{payment_details['extras_qty']} un.", 
+                        f"{payment_details['extras_valor']:.2f}", 
                         f"{total_extras:.2f}"
                     ])
 
@@ -1616,14 +850,14 @@ class App:
                     total_parcial = valor_diaria * dias_periodo
                     total_pago += total_parcial
                     table_data.append([
-                        f"Salário Parcial ({payment_details['start_date'].strftime('%d/%m')} a {payment_details['end_date'].strftime('%d/%m')})",
-                        f"{dias_periodo} dias",
-                        f"{valor_diaria:.2f}",
+                        f"Salário Parcial ({payment_details['start_date'].strftime('%d/%m')} a {payment_details['end_date'].strftime('%d/%m')})", 
+                        f"{dias_periodo} dias", 
+                        f"{valor_diaria:.2f}", 
                         f"{total_parcial:.2f}"
                     ])
-
+                
                 table_data.append(['TOTAL PAGO', '', '', f"R$ {total_pago:.2f}"])
-
+                
                 t = Table(table_data, colWidths=[6*cm, 3*cm, 4*cm, 4*cm])
                 t.setStyle(TableStyle([
                     ('BACKGROUND', (0,0), (-1,0), colors.teal),
@@ -1643,7 +877,8 @@ class App:
                 story.append(Paragraph("<b>Saldos Remanescentes (Após Pagamento)</b>", styles['h2']))
                 story.append(Paragraph(f"<b>Extras:</b> {int(func_info.get('extras_disponiveis', 0))}", styles['Normal']))
                 story.append(Paragraph(f"<b>Banco de Horas:</b> {format_minutes_to_hms(func_info.get('banco_horas', 0))}", styles['Normal']))
-
+                
+                # AJUSTE 1: Adicionar linha de Assinatura
                 story.append(Spacer(1, 2.5*cm))
                 story.append(Paragraph("________________________________________", styles['Normal']))
                 story.append(Paragraph(nome, styles['Normal']))
@@ -1660,18 +895,18 @@ class App:
         def process_fichado_payment():
             matricula = cmb_func.get().split(" - ")[0]
             nome = " ".join(cmb_func.get().split(" - ")[1:])
-
+            
             try:
                 extras_qty_str = data_vars["fichado_info"]['entry_extras_qty'].get()
                 extras_valor_str = data_vars["fichado_info"]['entry_extras_valor'].get()
-
+                
                 extras_qty = int(extras_qty_str) if extras_qty_str else 0
                 extras_valor = float(extras_valor_str.replace(',', '.')) if extras_valor_str else 0.0
 
                 if extras_qty > 0 and extras_valor <= 0:
                     messagebox.showerror("Erro", "Se a quantidade de extras for maior que zero, o valor unitário também deve ser.", parent=win)
                     return
-
+                
             except ValueError:
                 messagebox.showerror("Erro", "Valores inválidos para Extras (Qtde e Valor). Use apenas números.", parent=win)
                 return
@@ -1689,21 +924,17 @@ class App:
                     if salario_mensal <= 0:
                         messagebox.showerror("Erro", "Salário mensal deve ser um número positivo.", parent=win)
                         return
-
+                    
                     start_date, end_date = data_vars["fichado_info"]['date_picker'].get_dates()
-
+                    
                     if not start_date or not end_date:
                         messagebox.showerror("Erro", "Datas de início e fim são obrigatórias para salário parcial.", parent=win)
                         return
-
+                    
                     if end_date < start_date:
                         messagebox.showerror("Erro", "Data final não pode ser anterior à data inicial.", parent=win)
                         return
-
-                    if start_date < datetime.strptime(SYSTEM_START_DATE, "%Y-%m-%d").date():
-                        messagebox.showerror("Erro", f"Data de início não pode ser anterior a {SYSTEM_START_DATE}.", parent=win)
-                        return
-
+                    
                     payment_details['salario_mensal'] = salario_mensal
                     payment_details['start_date'] = start_date
                     payment_details['end_date'] = end_date
@@ -1714,13 +945,13 @@ class App:
                 except Exception as e:
                     messagebox.showerror("Erro Datas", f"Erro ao processar datas: {e}", parent=win)
                     return
-
+            
             msg_confirm = f"Confirma o pagamento para {nome}?\n"
             if extras_qty > 0:
                 msg_confirm += f"- {extras_qty} Extra(s) serão PAGOS e DEDUZIDOS do saldo.\n"
             if payment_details['pay_partial_salary']:
                  msg_confirm += f"- Salário parcial será CALCULADO.\n"
-
+            
             if not messagebox.askyesno("Confirmar Ação", msg_confirm, parent=win):
                 return
 
@@ -1743,7 +974,7 @@ class App:
                 style_title = styles['h1']
                 style_title.alignment = 1
                 style_title.textColor = colors.teal
-
+                
                 style_obs = styles['Italic']
                 style_obs.fontSize = 9
                 style_obs.textColor = colors.darkred
@@ -1765,25 +996,25 @@ class App:
                 story.append(Spacer(1, 1*cm))
 
                 table_data = [['Item', 'Qtde', 'Valor Unitário (R$)', 'Total (R$)']]
-
+                
                 dias_normais = payment_details['dias_normais']
                 dias_dobrados = payment_details['dias_dobrados']
                 valor_diaria = payment_details['valor_diaria']
                 extras_qty = payment_details.get('extras_qty', 0)
                 extras_valor = payment_details.get('extras_valor', 0.0)
-
+                
                 total_normais = len(dias_normais) * valor_diaria
                 total_dobrados = len(dias_dobrados) * (valor_diaria * 2)
                 total_extras_pago = extras_qty * extras_valor
                 total_pago = total_normais + total_dobrados + total_extras_pago
-
+                
                 if total_extras_pago > 0:
                     table_data.append(['Pagamento de Extras', f"{extras_qty} un.", f"{extras_valor:.2f}", f"{total_extras_pago:.2f}"])
-
+                
                 table_data.append(['Diárias Normais (Trabalhadas)', f"{len(dias_normais)} dias", f"{valor_diaria:.2f}", f"{total_normais:.2f}"])
                 table_data.append(['Diárias Dobradas (Dom/Feriado)', f"{len(dias_dobrados)} dias", f"{valor_diaria * 2:.2f}", f"{total_dobrados:.2f}"])
                 table_data.append(['TOTAL PAGO', '', '', f"R$ {total_pago:.2f}"])
-
+                
                 t = Table(table_data, colWidths=[6*cm, 3*cm, 4*cm, 4*cm])
                 t.setStyle(TableStyle([
                     ('BACKGROUND', (0,0), (-1,0), colors.teal),
@@ -1810,6 +1041,7 @@ class App:
                 story.append(Paragraph(f"<b>Banco de Horas:</b> {format_minutes_to_hms(func_info.get('banco_horas', 0))}", styles['Normal']))
                 story.append(Paragraph(f"<b>Extras:</b> {int(func_info.get('extras_disponiveis', 0))}", styles['Normal']))
 
+                # AJUSTE 1: Adicionar linha de Assinatura
                 story.append(Spacer(1, 2.5*cm))
                 story.append(Paragraph("________________________________________", styles['Normal']))
                 story.append(Paragraph(nome, styles['Normal']))
@@ -1826,33 +1058,29 @@ class App:
         def process_nao_fichado_payment():
             matricula = cmb_func.get().split(" - ")[0]
             nome = " ".join(cmb_func.get().split(" - ")[1:])
-
+            
             try:
                 extras_qty_str = data_vars["nao_fichado_info"]['entry_extras_qty'].get()
                 extras_valor_str = data_vars["nao_fichado_info"]['entry_extras_valor'].get()
-
+                
                 extras_qty = int(extras_qty_str) if extras_qty_str else 0
                 extras_valor = float(extras_valor_str.replace(',', '.')) if extras_valor_str else 0.0
 
                 if extras_qty > 0 and extras_valor <= 0:
                     messagebox.showerror("Erro", "Se a quantidade de extras for maior que zero, o valor unitário também deve ser.", parent=win)
                     return
-
+                
                 valor_diaria_str = data_vars["nao_fichado_info"]['entry_valor_diaria'].get()
                 valor_diaria = float(valor_diaria_str.replace(',', '.')) if valor_diaria_str else 0.0
-
+                
                 if valor_diaria <= 0:
                     messagebox.showerror("Erro", "O Valor da Diária deve ser um número positivo.", parent=win)
                     return
 
                 start_date, end_date = data_vars["nao_fichado_info"]['date_picker'].get_dates()
-
+                
                 if not start_date or not end_date or end_date < start_date:
                     messagebox.showerror("Erro", "Período inválido para as diárias.", parent=win)
-                    return
-
-                if start_date < datetime.strptime(SYSTEM_START_DATE, "%Y-%m-%d").date():
-                    messagebox.showerror("Erro", f"Data de início não pode ser anterior a {SYSTEM_START_DATE}.", parent=win)
                     return
 
             except ValueError:
@@ -1864,7 +1092,7 @@ class App:
 
             try:
                 worked_days = self.db.get_worked_days_in_range(matricula, start_date, end_date)
-
+                
                 dias_normais = []
                 dias_dobrados = []
 
@@ -1873,7 +1101,7 @@ class App:
                         dias_dobrados.append(dia)
                     else:
                         dias_normais.append(dia)
-
+                
                 total_diarias = (len(dias_normais) * valor_diaria) + (len(dias_dobrados) * valor_diaria * 2)
                 total_extras = extras_qty * extras_valor
                 total_payment = total_diarias + total_extras
@@ -1890,7 +1118,7 @@ class App:
 
                 if not messagebox.askyesno("Confirmar Pagamento", msg_confirm, parent=win):
                     return
-
+                
                 payment_details = {
                     'start_date': start_date,
                     'end_date': end_date,
@@ -1909,82 +1137,82 @@ class App:
 
             except Exception as e:
                 messagebox.showerror("Erro Cálculo", f"Erro ao calcular dias trabalhados: {e}", parent=win)
-
+                
         def setup_fichado_ui(func_info):
             frame_saldos = ttk.LabelFrame(details_frame, text=" Saldos Atuais ", style='TLabelframe')
             frame_saldos.pack(fill='x', pady=10)
-
+            
             lbl_saldo_bh = tk.Label(frame_saldos, text=f"BH: {format_minutes_to_hms(func_info.get('banco_horas', 0))}", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 10, "bold"))
             lbl_saldo_bh.pack(side=tk.LEFT, padx=10, pady=5)
-
+            
             lbl_saldo_extras = tk.Label(frame_saldos, text=f"Extras: {int(func_info.get('extras_disponiveis', 0))} un.", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 10, "bold"))
             lbl_saldo_extras.pack(side=tk.LEFT, padx=10, pady=5)
-
+            
             frame_extras = ttk.LabelFrame(details_frame, text=" Pagamento de Extras ", style='TLabelframe')
             frame_extras.pack(fill='x', pady=5)
 
             tk.Label(frame_extras, text="Qtde Extras a Pagar:", bg=self.BG_COLOR, fg=self.FG_COLOR).grid(row=0, column=0, padx=5, pady=5, sticky='w')
             entry_extras_qty = ttk.Entry(frame_extras, width=10)
             entry_extras_qty.grid(row=0, column=1, padx=5, pady=5)
-
+            
             tk.Label(frame_extras, text="Valor Unitário (R$):", bg=self.BG_COLOR, fg=self.FG_COLOR).grid(row=0, column=2, padx=5, pady=5, sticky='w')
             entry_extras_valor = ttk.Entry(frame_extras, width=10)
             entry_extras_valor.grid(row=0, column=3, padx=5, pady=5)
-
+            
             data_vars["fichado_info"]['entry_extras_qty'] = entry_extras_qty
             data_vars["fichado_info"]['entry_extras_valor'] = entry_extras_valor
 
             frame_parcial_group = ttk.LabelFrame(details_frame, text=" Pagamento de Salário Parcial ", style='TLabelframe')
             frame_parcial_group.pack(fill='x', pady=10)
-
+            
             chk_partial_salary = ttk.Checkbutton(frame_parcial_group, text="Pagar Salário Parcial?", variable=data_vars["partial_salary_var"], onvalue="Sim", offvalue="Não")
             chk_partial_salary.pack(anchor='w', padx=5, pady=5)
-
+            
             frame_parcial_widgets = tk.Frame(frame_parcial_group, bg=self.BG_COLOR)
-
+            
             date_picker = DateRangePicker(frame_parcial_widgets, self.BG_COLOR, self.style_colors_dict)
             date_picker.pack(pady=10)
-
+            
             tk.Label(frame_parcial_widgets, text="Valor Salário Mensal (R$):", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(anchor='w', padx=5, pady=(10,0))
             entry_salario_mensal = ttk.Entry(frame_parcial_widgets, width=20)
             entry_salario_mensal.pack(anchor='w', padx=5, pady=5)
-
+            
             data_vars["fichado_info"]['date_picker'] = date_picker
             data_vars["fichado_info"]['entry_salario_mensal'] = entry_salario_mensal
-
+            
             def toggle_partial_salary_widgets(*args):
                 if data_vars["partial_salary_var"].get() == "Sim":
                     frame_parcial_widgets.pack(fill='x', pady=5)
                 else:
                     frame_parcial_widgets.pack_forget()
-
+            
             data_vars["partial_salary_var"].trace("w", toggle_partial_salary_widgets)
             toggle_partial_salary_widgets()
-
+            
             btn_process = ttk.Button(details_frame, text="Gerar Relatório e Deduzir Extras", style='TButton', command=process_fichado_payment)
             btn_process.pack(pady=20)
 
         def setup_nao_fichado_ui(func_info):
             frame_saldos = ttk.LabelFrame(details_frame, text=" Saldos Atuais ", style='TLabelframe')
             frame_saldos.pack(fill='x', pady=10)
-
+            
             lbl_saldo_bh = tk.Label(frame_saldos, text=f"BH: {format_minutes_to_hms(func_info.get('banco_horas', 0))}", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 10, "bold"))
             lbl_saldo_bh.pack(side=tk.LEFT, padx=10, pady=5)
-
+            
             lbl_saldo_extras = tk.Label(frame_saldos, text=f"Extras: {int(func_info.get('extras_disponiveis', 0))} un.", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 10, "bold"))
             lbl_saldo_extras.pack(side=tk.LEFT, padx=10, pady=5)
-
+            
             frame_extras = ttk.LabelFrame(details_frame, text=" Pagamento de Extras ", style='TLabelframe')
             frame_extras.pack(fill='x', pady=5)
 
             tk.Label(frame_extras, text="Qtde Extras a Pagar:", bg=self.BG_COLOR, fg=self.FG_COLOR).grid(row=0, column=0, padx=5, pady=5, sticky='w')
             entry_extras_qty = ttk.Entry(frame_extras, width=10)
             entry_extras_qty.grid(row=0, column=1, padx=5, pady=5)
-
+            
             tk.Label(frame_extras, text="Valor Unitário (R$):", bg=self.BG_COLOR, fg=self.FG_COLOR).grid(row=0, column=2, padx=5, pady=5, sticky='w')
             entry_extras_valor = ttk.Entry(frame_extras, width=10)
             entry_extras_valor.grid(row=0, column=3, padx=5, pady=5)
-
+            
             data_vars["nao_fichado_info"]['entry_extras_qty'] = entry_extras_qty
             data_vars["nao_fichado_info"]['entry_extras_valor'] = entry_extras_valor
 
@@ -1993,26 +1221,26 @@ class App:
 
             date_picker = DateRangePicker(frame_diarias, self.BG_COLOR, self.style_colors_dict)
             date_picker.pack(pady=10)
-
+            
             tk.Label(frame_diarias, text="Valor da Diária (R$):", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(anchor='w', padx=5, pady=(10,0))
             entry_valor_diaria = ttk.Entry(frame_diarias, width=20)
             entry_valor_diaria.pack(anchor='w', padx=5, pady=5)
-
+            
             data_vars["nao_fichado_info"]['date_picker'] = date_picker
             data_vars["nao_fichado_info"]['entry_valor_diaria'] = entry_valor_diaria
-
+            
             btn_process = ttk.Button(details_frame, text="Calcular e Gerar Relatório", style='TButton', command=process_nao_fichado_payment)
             btn_process.pack(pady=20)
-
+            
         def on_employee_select(event=None):
             selection = cmb_func.get()
             if not selection:
                 return
-
+            
             clear_details_frame()
             matricula = selection.split(" - ")[0]
             func_info = self.db.get_funcionario_info(matricula)
-
+            
             if func_info.get('fichado', 0) == 1:
                 setup_fichado_ui(func_info)
             else:
@@ -2022,47 +1250,22 @@ class App:
 
 
     def on_export_log(self, *args):
-        win = tk.Toplevel(self.root); win.title("Exportar Log")
-        win.configure(bg="#0a192f"); win.state('zoomed'); win.minsize(800, 450)
-        win.resizable(False, False); win.transient(self.root); win.grab_set()
-
-        main_frame = tk.Frame(win, bg="#0a192f")
-        main_frame.pack(expand=True)
-
-        form_frame = tk.Frame(main_frame, bg="#0a192f", padx=20, pady=20)
-        form_frame.pack(fill=tk.BOTH, expand=True)
-
-        ttk.Button(form_frame, text="Sair", style='Delete.TButton', command=win.destroy, width=10).pack(anchor='e', pady=(0,10))
-
-        tk.Label(form_frame, text="1. Func:", bg="#0a192f", fg="#ccd6f6", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5)); nomes = [f"{f['matricula']} - {f['nome']}" for f in self.db.get_all_funcionarios()]; cmb_func = ttk.Combobox(form_frame, values=nomes, state="readonly", width=50); cmb_func.pack(anchor="w", pady=(0, 20)); tk.Label(form_frame, text="2. Período:", bg="#0a192f", fg="#ccd6f6", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5))
-
-        try:
-            min_date = datetime.strptime(SYSTEM_START_DATE, "%Y-%m-%d").date()
-        except:
-            min_date = None
-
-        period_frame = tk.Frame(form_frame, bg="#0a1f2f"); period_frame.pack(anchor="w"); tk.Label(period_frame, text="De:", bg="#0a192f", fg="#ccd6f6").pack(side=tk.LEFT, padx=(0,5)); cal_start = Calendar(period_frame, selectmode="day", date_pattern="yyyy-mm-dd", locale='pt_BR', background="#008080", foreground="white", headersbackground="#008080", mindate=min_date); cal_start.pack(side=tk.LEFT, padx=(0, 10))
-        tk.Label(period_frame, text="Até:", bg="#0a192f", fg="#ccd6f6").pack(side=tk.LEFT, padx=(0,5)); cal_end = Calendar(period_frame, selectmode="day", date_pattern="yyyy-mm-dd", locale='pt_BR', background="#008080", foreground="white", headersbackground="#008080", mindate=min_date); cal_end.pack(side=tk.LEFT); btn_export = ttk.Button(form_frame, text="Gerar PDF", style='TButton'); btn_export.pack(pady=20)
-
-        if min_date:
-            cal_start.selection_set(max(date.today().replace(day=1), min_date))
-        else:
-            cal_start.selection_set(date.today().replace(day=1))
-
+        win = tk.Toplevel(self.root); win.title("Exportar Log"); win.geometry("700x350"); win.configure(bg="#0a192f"); win.resizable(False, False); win.transient(self.root); win.grab_set()
+        main_frame = tk.Frame(win, bg="#0a192f", padx=20, pady=20); main_frame.pack(fill=tk.BOTH, expand=True)
+        tk.Label(main_frame, text="1. Func:", bg="#0a192f", fg="#ccd6f6", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5)); nomes = [f"{f['matricula']} - {f['nome']}" for f in self.db.get_all_funcionarios()]; cmb_func = ttk.Combobox(main_frame, values=nomes, state="readonly", width=50); cmb_func.pack(anchor="w", pady=(0, 20)); tk.Label(main_frame, text="2. Período:", bg="#0a192f", fg="#ccd6f6", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5))
+        period_frame = tk.Frame(main_frame, bg="#0a192f"); period_frame.pack(anchor="w"); tk.Label(period_frame, text="De:", bg="#0a192f", fg="#ccd6f6").pack(side=tk.LEFT, padx=(0,5)); cal_start = Calendar(period_frame, selectmode="day", date_pattern="yyyy-mm-dd", locale='pt_BR', background="#008080", foreground="white", headersbackground="#008080"); cal_start.pack(side=tk.LEFT, padx=(0, 10))
+        tk.Label(period_frame, text="Até:", bg="#0a192f", fg="#ccd6f6").pack(side=tk.LEFT, padx=(0,5)); cal_end = Calendar(period_frame, selectmode="day", date_pattern="yyyy-mm-dd", locale='pt_BR', background="#008080", foreground="white", headersbackground="#008080"); cal_end.pack(side=tk.LEFT); btn_export = ttk.Button(main_frame, text="Gerar PDF", style='TButton'); btn_export.pack(pady=20)
         def generate_pdf():
             selection = cmb_func.get();
             if not selection: messagebox.showerror("Erro", "Funcionário não selecionado.", parent=win); return
             matricula = selection.split(" - ")[0]; nome_func = " ".join(selection.split(" - ")[1:])
             start_date_str = cal_start.get_date(); end_date_str = cal_end.get_date()
-
+            
             try:
                 start_dt = datetime.strptime(start_date_str, '%Y-%m-%d').date()
                 end_dt = datetime.strptime(end_date_str, '%Y-%m-%d').date()
                 if end_dt < start_dt:
                     messagebox.showerror("Erro", "Data final não pode ser anterior à data inicial.", parent=win)
-                    return
-                if start_dt < datetime.strptime(SYSTEM_START_DATE, "%Y-%m-%d").date():
-                    messagebox.showerror("Erro", f"Data de início não pode ser anterior a {SYSTEM_START_DATE}.", parent=win)
                     return
             except Exception as e:
                 messagebox.showerror("Erro", f"Datas inválidas: {e}", parent=win)
@@ -2070,129 +1273,84 @@ class App:
 
             logs = self.db.get_logs_for_period(matricula, start_date_str, end_date_str)
             if not logs: messagebox.showinfo("Aviso", "Nenhum log encontrado.", parent=win); return
-
+            
             filepath = filedialog.asksaveasfilename(defaultextension=".pdf", filetypes=[("PDF files", "*.pdf")], title="Salvar Relatório", initialfile=f"Log_{nome_func.replace(' ','_')}_{start_date_str}_a_{end_date_str}.pdf")
             if not filepath: return
             try:
-                doc = SimpleDocTemplate(filepath, pagesize=landscape(A4), rightMargin=2*cm, leftMargin=2*cm, topMargin=2*cm, bottomMargin=2*cm); styles = getSampleStyleSheet(); story = []
+                doc = SimpleDocTemplate(filepath, pagesize=A4, rightMargin=2*cm, leftMargin=2*cm, topMargin=2*cm, bottomMargin=2*cm); styles = getSampleStyleSheet(); story = []
                 story.append(Paragraph("Relatório Log Alterações", styles['h1'])); story.append(Spacer(1, 0.5*cm)); story.append(Paragraph(f"<b>Funcionário:</b> {nome_func}", styles['Normal'])); story.append(Paragraph(f"<b>Matrícula:</b> {matricula}", styles['Normal'])); story.append(Paragraph(f"<b>Período:</b> {start_dt.strftime('%d/%m/%Y')} a {end_dt.strftime('%d/%m/%Y')}", styles['Normal'])); story.append(Spacer(1, 1*cm))
                 table_data = [['Data Ponto', 'Data Edição', 'Valor Antigo', 'Valor Novo', 'Justificativa']]; [table_data.append([datetime.strptime(log['data_ponto'], '%Y-%m-%d').strftime('%d/%m/%Y'), datetime.strptime(log['data_edicao'], '%Y-%m-%d %H:%M:%S').strftime('%d/%m/%Y %H:%M'), log['periodos_antigos'], log['periodos_novos'], log['justificativa']]) for log in logs]
-                t = Table(table_data, colWidths=[2.5*cm, 3.0*cm, 8.0*cm, 8.0*cm, 4.0*cm]); t.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,0), colors.teal), ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke), ('ALIGN', (0,0), (-1,-1), 'CENTER'), ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'), ('BOTTOMPADDING', (0,0), (-1,0), 12), ('BACKGROUND', (0,1), (-1,-1), colors.beige), ('GRID', (0,0), (-1,-1), 1, colors.black)]))
+                t = Table(table_data, colWidths=[2.5*cm, 3*cm, 3*cm, 3*cm, 5*cm]); t.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,0), colors.teal), ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke), ('ALIGN', (0,0), (-1,-1), 'CENTER'), ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'), ('BOTTOMPADDING', (0,0), (-1,0), 12), ('BACKGROUND', (0,1), (-1,-1), colors.beige), ('GRID', (0,0), (-1,-1), 1, colors.black)]))
                 story.append(t); doc.build(story); messagebox.showinfo("Sucesso", f"Relatório salvo:\n{filepath}", parent=win); win.destroy()
             except Exception as e: messagebox.showerror("Erro PDF", f"Erro: {e}", parent=win)
         btn_export.config(command=generate_pdf)
 
-    def on_recalculate_and_refresh(self):
-        """
-        Força o recálculo do saldo para o(s) funcionário(s) selecionado(s)
-        e depois atualiza o panorama.
-        """
-        self.append_log("Iniciando recálculo manual de saldos...")
-        target_matricula_str = self.cmb_filter_func.get()
-        recalc_errors = 0
-
-        if target_matricula_str == "Todos":
-            if not messagebox.askyesno("Confirmar Recálculo Total", "Isso irá recalcular o saldo para TODOS os funcionários. Pode demorar.\n\nDeseja continuar?"):
-                self.append_log("Recálculo cancelado pelo usuário.")
-                return
-            all_employees = self.db.get_all_funcionarios()
-            self.append_log(f"Recalculando {len(all_employees)} funcionários...")
-            for emp in all_employees:
-                try:
-                    self.db.recalculate_full_balance_for_employee(emp['matricula'])
-                except Exception as e:
-                   self.append_log(f"ERRO ao recalcular saldo para {emp['matricula']}: {e}")
-                   recalc_errors += 1
-        else:
-            try:
-                target_matricula = target_matricula_str.split(" - ")[0]
-                self.append_log(f"Recalculando saldo para {target_matricula_str}...")
-                self.db.recalculate_full_balance_for_employee(target_matricula)
-            except IndexError:
-                self.append_log("ERRO: Nenhum funcionário selecionado para recalcular.")
-                recalc_errors += 1
-            except Exception as e:
-                self.append_log(f"ERRO ao recalcular saldo para {target_matricula}: {e}")
-                recalc_errors += 1
-
-        if recalc_errors == 0:
-            self.append_log("Recálculo concluído com sucesso.")
-            messagebox.showinfo("Concluído", "Saldos recalculados e panorama atualizado.")
-        else:
-             self.append_log(f"Recálculo concluído com {recalc_errors} erro(s).")
-             messagebox.showwarning("Atenção", f"Recálculo concluído com {recalc_errors} erro(s). Verifique o log.")
-
-        # Agora, atualiza a visualização
-        self.load_point_viewer(force_reload=True)
-        self._update_calendar_tags()
-
-
+    # AJUSTE 3: Modificação do Layout do Panorama (setup_point_viewer)
     def setup_point_viewer(self, parent_frame):
+        # O frame_viewer agora está em main_frame (row 1, col 0)
         frame_viewer = ttk.LabelFrame(parent_frame, text=" Panorama ", style='TLabelframe')
         frame_viewer.grid(row=1, column=0, sticky="nsew", pady=5, padx=(0, 5))
-
+        
+        # Configuração de expansão: Linha 3 (Treeview) vai expandir
         frame_viewer.grid_rowconfigure(3, weight=5)
-        frame_viewer.grid_columnconfigure(0, weight=1)
-
-        frame_controls = tk.Frame(frame_viewer, bg="#0a192f");
+        frame_viewer.grid_columnconfigure(0, weight=1) 
+        
+        # --- Controles (Linha 0) ---
+        frame_controls = tk.Frame(frame_viewer, bg="#0a192f"); 
         frame_controls.grid(row=0, column=0, sticky="ew", pady=(5,0), padx=10)
         tk.Label(frame_controls, text="Funcionário:", bg="#0a192f", fg="white").pack(side=tk.LEFT, padx=(0,5))
         self.cmb_filter_func = ttk.Combobox(frame_controls, state="readonly", width=40)
         self.cmb_filter_func.pack(side=tk.LEFT, padx=(0, 20))
         self.cmb_filter_func.bind("<<ComboboxSelected>>", lambda e: self.load_point_viewer(force_reload=True))
-
+        
         action_button_frame = tk.Frame(frame_controls, bg="#0a192f")
         action_button_frame.pack(side=tk.RIGHT)
-
-        ttk.Button(action_button_frame, text="Atualizar", command=self.on_recalculate_and_refresh).pack(side=tk.LEFT, padx=5)
-
+        ttk.Button(action_button_frame, text="Atualizar", command=self.load_point_viewer).pack(side=tk.LEFT, padx=5)
+        
+        # AJUSTE 2: Novo botão de Exportar Ponto
         ttk.Button(action_button_frame, text="📄 Exportar Ponto", command=self.on_export_panorama).pack(side=tk.LEFT, padx=5)
-
+        
         ttk.Button(action_button_frame, text="💾 Salvar", command=self.commit_all_changes).pack(side=tk.LEFT, padx=5)
-
+        
+        # --- Frame do Calendário (Linha 1) - Reestruturado com Grid ---
         calendar_frame = tk.Frame(frame_viewer, bg="#0a192f")
         calendar_frame.grid(row=1, column=0, sticky="ew", pady=5, padx=10)
         calendar_frame.grid_columnconfigure(1, weight=1)
         calendar_frame.grid_columnconfigure(2, weight=1)
-        calendar_frame.grid_rowconfigure(1, weight=1)
+        calendar_frame.grid_rowconfigure(1, weight=1) # Faz as listas expandirem
 
-        try:
-            min_date = datetime.strptime(SYSTEM_START_DATE, "%Y-%m-%d").date()
-        except:
-            min_date = None
-
-        self.main_calendar = Calendar(calendar_frame, selectmode="day", date_pattern="yyyy-mm-dd", locale='pt_BR',
-                                      background="#008080", foreground="white", headersbackground="#008080",
-                                      normalbackground="#112240", weekendbackground="#172a45",
-                                      othermonthbackground="#0a192f", othermonthforeground="#6a7b9d",
-                                      selectbackground=self.ACCENT_COLOR,
-                                      mindate=min_date)
-
+        self.main_calendar = Calendar(calendar_frame, selectmode="day", date_pattern="yyyy-mm-dd", locale='pt_BR', 
+                                      background="#008080", foreground="white", headersbackground="#008080", 
+                                      normalbackground="#112240", weekendbackground="#172a45", 
+                                      othermonthbackground="#0a192f", othermonthforeground="#6a7b9d", #aqui
+                                      selectbackground=self.ACCENT_COLOR)
         self.main_calendar.grid(row=0, column=0, rowspan=2, padx=(0, 20), sticky='n')
         self.main_calendar.bind("<<CalendarSelected>>", self.on_calendar_click)
-        self.main_calendar.bind("<<CalendarMonthChanged>>", self.on_calendar_month_changed)
-
+        self.main_calendar.bind("<<CalendarMonthChanged>>", self.on_calendar_month_changed) 
+        
         self.main_calendar.tag_config('start_date', background=self.START_DATE_COLOR, foreground='white')
         self.main_calendar.tag_config('end_date', background=self.END_DATE_COLOR, foreground='white')
         self.main_calendar.tag_config('range_date', background=self.RANGE_BG_COLOR, foreground='#ccd6f6')
-        self.main_calendar.tag_config('holiday', background=self.HOLIDAY_COLOR, foreground='white')
-
+        self.main_calendar.tag_config('holiday', background=self.HOLIDAY_COLOR, foreground='white') 
+        
+        # --- Labels de Período (Canto superior direito do calendário) ---
         period_frame = tk.Frame(calendar_frame, bg="#0a192f")
         period_frame.grid(row=0, column=1, columnspan=2, sticky='nw', padx=5)
-
+        
         tk.Label(period_frame, text="Período:", bg="#0a192f", fg="#ccd6f6", font=('Segoe UI', 10, 'bold')).pack(anchor='w')
         start_frame = tk.Frame(period_frame, bg="#0a192f")
         start_frame.pack(anchor='w', pady=2)
         tk.Label(start_frame, text="Início:", bg="#0a1f2f", fg="#ccd6f6", width=5, anchor='w').pack(side=tk.LEFT)
         self.lbl_selected_start = tk.Label(start_frame, text="--/--/----", bg="#0a192f", fg="white", font=('Segoe UI', 10, 'bold'), width=12, anchor='w')
         self.lbl_selected_start.pack(side=tk.LEFT)
-
+        
         end_frame = tk.Frame(period_frame, bg="#0a192f")
         end_frame.pack(anchor='w', pady=2)
         tk.Label(end_frame, text="Fim:", bg="#0a192f", fg="#ccd6f6", width=5, anchor='w').pack(side=tk.LEFT)
         self.lbl_selected_end = tk.Label(end_frame, text="--/--/----", bg="#0a192f", fg="white", font=('Segoe UI', 10, 'bold'), width=12, anchor='w')
         self.lbl_selected_end.pack(side=tk.LEFT)
 
+        # --- Lista de Feriados (Meio, Coluna 1) ---
         holiday_frame = tk.Frame(calendar_frame, bg=self.BG_COLOR)
         holiday_frame.grid(row=1, column=1, sticky='nsew', padx=5, pady=(10,0))
         tk.Label(holiday_frame, text="Feriados:", bg="#0a192f", fg="#ccd6f6", font=('Segoe UI', 10, 'bold')).pack(anchor='w', pady=(0, 2))
@@ -2204,6 +1362,7 @@ class App:
         holiday_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.holiday_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
+        # --- Lista de Punições (Meio, Coluna 2) ---
         punishment_frame = tk.Frame(calendar_frame, bg=self.BG_COLOR)
         punishment_frame.grid(row=1, column=2, sticky='nsew', padx=5, pady=(10,0))
         tk.Label(punishment_frame, text="Punições:", bg="#0a192f", fg="#ccd6f6", font=('Segoe UI', 10, 'bold')).pack(anchor='w', pady=(0, 2))
@@ -2216,17 +1375,19 @@ class App:
         self.punishment_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.lbl_total_punishments = tk.Label(punishment_frame, text="Total Punições: --", bg="#0a192f", fg=self.FG_COLOR, font=('Segoe UI', 9))
         self.lbl_total_punishments.pack(anchor='w', pady=(2, 0))
-
+        
+        # --- Saldos (Linha 2) ---
         frame_saldos = ttk.LabelFrame(frame_viewer, text=" Saldos Atuais", style='TLabelframe')
         frame_saldos.grid(row=2, column=0, sticky="ew", pady=(10, 5), padx=10)
         tk.Label(frame_saldos, text="BH:", font=("Segoe UI", 11), bg="#0a192f", fg="white").pack(side=tk.LEFT, padx=(10,0)); self.lbl_saldo_bh_total = tk.Label(frame_saldos, text="--:--:--", font=("Segoe UI", 11, "bold"), bg="#0a192f", fg="white", width=15, anchor="w"); self.lbl_saldo_bh_total.pack(side=tk.LEFT, padx=(5, 20)); tk.Label(frame_saldos, text="Extras:", font=("Segoe UI", 11), bg="#0a192f", fg="white").pack(side=tk.LEFT); self.lbl_saldo_extras_total = tk.Label(frame_saldos, text="--", font=("Segoe UI", 11, "bold"), bg="#0a192f", fg="white", width=10, anchor="w"); self.lbl_saldo_extras_total.pack(side=tk.LEFT, padx=(5, 20)); tk.Label(frame_saldos, text="Fichado:", font=("Segoe UI", 11), bg="#0a192f", fg="white").pack(side=tk.LEFT); self.lbl_fichado_status = tk.Label(frame_saldos, text="--", font=("Segoe UI", 11, "bold"), bg="#0a192f", fg="white", width=10, anchor="w"); self.lbl_fichado_status.pack(side=tk.LEFT, padx=(5, 20)); tk.Label(frame_saldos, text="Setor:", font=("Segoe UI", 11), bg="#0a192f", fg="white").pack(side=tk.LEFT); self.lbl_setor_status = tk.Label(frame_saldos, text="--", font=("Segoe UI", 11, "bold"), bg="#0a192f", fg="white", width=15, anchor="w"); self.lbl_setor_status.pack(side=tk.LEFT, padx=5)
-
-        tree_frame = tk.Frame(frame_viewer, bg="#0a192f");
+        
+        # --- Treeview (Linha 3) ---
+        tree_frame = tk.Frame(frame_viewer, bg="#0a192f"); 
         tree_frame.grid(row=3, column=0, sticky="nsew", padx=10, pady=10)
         tree_frame.grid_rowconfigure(0, weight=1)
         tree_frame.grid_columnconfigure(0, weight=1)
-
-        columns = ("Matrícula", "Nome", "Data", "E1", "S1", "E2", "S2", "Carga_Horaria", "Punição", "Total_Desconto");
+        
+        columns = ("Matrícula", "Nome", "Data", "E1", "S1", "E2", "S2", "Carga_Horaria", "Punição", "Total_Desconto"); 
         self.tree_viewer = ttk.Treeview(tree_frame, columns=columns, show="headings")
         v_scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree_viewer.yview)
         h_scroll = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree_viewer.xview)
@@ -2234,26 +1395,26 @@ class App:
         self.tree_viewer.grid(row=0, column=0, sticky='nsew')
         v_scroll.grid(row=0, column=1, sticky='ns')
         h_scroll.grid(row=1, column=0, sticky='ew')
-
-        col_widths = {"Matrícula": 80, "Nome": 220, "Data": 80, "E1": 60, "S1": 60, "E2": 60, "S2": 60, "Carga_Horaria": 90, "Punição": 80, "Total_Desconto": 100}
+        
+        col_widths = {"Matrícula": 80, "Nome": 200, "Data": 100, "E1": 60, "S1": 60, "E2": 60, "S2": 60, "Carga_Horaria": 110, "Punição": 100, "Total_Desconto": 110}
         for col in columns:
             anchor = tk.W if col == "Nome" else tk.CENTER
             self.tree_viewer.heading(col, text=col.replace('_', ' ').replace('Carga Horaria', 'Carga Horária'))
             self.tree_viewer.column(col, width=col_widths.get(col, 100), anchor=anchor, stretch=tk.NO)
-
+        
         self.tree_viewer.bind('<ButtonRelease-1>', self.start_in_place_edit)
         self.tree_viewer.tag_configure('evenrow', background='#112240')
         self.tree_viewer.tag_configure('oddrow', background='#172a45')
-
+        
         self.update_employee_filter()
         self._update_calendar_tags()
-
+        self.load_point_viewer(force_reload=True)
 
     def on_calendar_month_changed(self, event=None): self._update_calendar_tags()
     def _clear_calendar_tags(self): self.main_calendar.calevent_remove('all')
     def _update_calendar_tags(self):
         self._clear_calendar_tags()
-
+        
         try:
             current_cal_year = self.main_calendar._date.year
             current_cal_month = self.main_calendar._date.month
@@ -2262,7 +1423,7 @@ class App:
                 self.main_calendar.calevent_create(holiday_date, 'Feriado', tags='holiday')
         except Exception as e:
             print(f"Erro ao buscar feriados: {e}")
-
+        
         if self.selected_start_date:
             self.main_calendar.calevent_create(self.selected_start_date, 'Início', tags='start_date')
             self.lbl_selected_start.config(text=self.selected_start_date.strftime("%d/%m/%Y"))
@@ -2272,7 +1433,7 @@ class App:
         if self.selected_end_date:
             self.main_calendar.calevent_create(self.selected_end_date, 'Fim', tags='end_date')
             self.lbl_selected_end.config(text=self.selected_end_date.strftime("%d/%m/%Y"))
-
+            
             if self.selected_start_date and self.selected_start_date < self.selected_end_date:
                 current_date = self.selected_start_date + timedelta(days=1)
                 while current_date < self.selected_end_date:
@@ -2286,34 +1447,25 @@ class App:
             clicked_date = self.main_calendar.selection_get()
         except tk.TclError:
             return
-
-        if not clicked_date:
+            
+        if not clicked_date: 
             return
-
-        try:
-            min_date = datetime.strptime(SYSTEM_START_DATE, "%Y-%m-%d").date()
-            if clicked_date < min_date:
-                clicked_date = min_date
-                self.main_calendar.selection_set(clicked_date)
-        except:
-            pass
 
         if self.selecting_start:
             self.selected_start_date = clicked_date
             self.selected_end_date = None
-            self.selecting_start = False
+            self.selecting_start = False 
             self.lbl_selected_end.config(text="Selecione...")
         else:
             self.selected_end_date = clicked_date
-            self.selecting_start = True
+            self.selecting_start = True 
 
             if self.selected_start_date and self.selected_end_date and self.selected_end_date < self.selected_start_date:
                 self.selected_start_date, self.selected_end_date = self.selected_end_date, self.selected_start_date
+            
+            self.load_point_viewer(force_reload=True) 
 
-            # Chama load_point_viewer apenas quando a data final é selecionada
-            self.load_point_viewer(force_reload=True)
-
-        self._update_calendar_tags()
+        self._update_calendar_tags() 
 
 
     def update_employee_filter(self):
@@ -2326,10 +1478,10 @@ class App:
         if hasattr(self, 'holiday_listbox'): self.holiday_listbox.delete(0, tk.END)
         if hasattr(self, 'punishment_listbox'): self.punishment_listbox.delete(0, tk.END)
         if hasattr(self, 'lbl_total_punishments'): self.lbl_total_punishments.config(text="Total Punições: --")
-
+        
         start_date = self.selected_start_date; end_date = self.selected_end_date
-
-        if not start_date or not end_date:
+        
+        if not start_date or not end_date: 
             [self.tree_viewer.delete(i) for i in self.tree_viewer.get_children()]
             self.lbl_saldo_bh_total.config(text="--:--:--")
             self.lbl_saldo_extras_total.config(text="--")
@@ -2340,38 +1492,31 @@ class App:
             for lbl in [getattr(self, 'lbl_total_punishments', None)]:
                 if lbl: lbl.config(text="Total Punições: --")
             return
-
+            
         selected_func = self.cmb_filter_func.get(); target_matricula = selected_func.split(" - ")[0] if selected_func != "Todos" else None; [self.tree_viewer.delete(i) for i in self.tree_viewer.get_children()]
-
+        
         panorama_data = self.db.get_point_panorama(start_date, end_date, target_matricula)
-
-        last_item = None
+        
         for i, item in enumerate(panorama_data):
             data_db_str = item['Data']; data_ptbr = datetime.strptime(data_db_str, "%Y-%m-%d").strftime("%d/%m/%Y") if data_db_str else data_db_str
             punicao_minutos = self.db.get_total_punishment_minutes_for_day(item['Matricula'], data_db_str); punicao_hms = format_minutes_to_hms(punicao_minutos) if punicao_minutos > 0 else "00:00:00"
-
             values = (item['Matricula'], item['Nome'], data_ptbr, item['E1'], item['S1'], item['E2'], item['S2'], item['Carga_Horaria'], punicao_hms, item['Total_Desconto'])
             tag = 'evenrow' if i % 2 == 0 else 'oddrow'; self.tree_viewer.insert("", "end", values=values, iid=(item['Matricula'], item['Data']), tags=(tag,))
-            last_item = item
-
-        if target_matricula:
-            func_info = self.db.get_funcionario_info(target_matricula)
-
-            self.lbl_saldo_bh_total.config(text=format_minutes_to_hms(func_info.get('banco_horas', 0)))
-            self.lbl_saldo_extras_total.config(text=str(int(func_info.get('extras_disponiveis', 0))))
-
-            fichado_val = func_info.get('fichado', 0); fichado_str = "Sim" if fichado_val == 1 else "Não"; setor_str = func_info.get('setor', 'N/D'); self.lbl_fichado_status.config(text=fichado_str); self.lbl_setor_status.config(text=setor_str)
-        else:
+        
+        if target_matricula: 
+            func_info = self.db.get_funcionario_info(target_matricula); saldo_bh = func_info.get('banco_horas', 0); saldo_extras = func_info.get('extras_disponiveis', 0); self.lbl_saldo_bh_total.config(text=format_minutes_to_hms(saldo_bh)); self.lbl_saldo_extras_total.config(text=str(int(saldo_extras))); fichado_val = func_info.get('fichado', 0); fichado_str = "Sim" if fichado_val == 1 else "Não"; setor_str = func_info.get('setor', 'N/D'); self.lbl_fichado_status.config(text=fichado_str); self.lbl_setor_status.config(text=setor_str)
+        else: 
             self.lbl_saldo_bh_total.config(text="--:--:--"); self.lbl_saldo_extras_total.config(text="--"); self.lbl_fichado_status.config(text="--"); self.lbl_setor_status.config(text="--")
-
-        if start_date and end_date and hasattr(self, 'holiday_listbox'):
+        
+        if start_date and end_date and hasattr(self, 'holiday_listbox'): 
             holidays = self.db.get_holidays_in_range(start_date, end_date); [self.holiday_listbox.insert(tk.END, f"{datetime.strptime(h['data'], '%Y-%m-%d').strftime('%d/%m/%Y')} - {h['descricao']} ({h['tipo']})") for h in holidays if h.get('data')]
-
-        if target_matricula and start_date and end_date and hasattr(self, 'punishment_listbox'):
+        
+        if target_matricula and start_date and end_date and hasattr(self, 'punishment_listbox'): 
             punishments = self.db.get_punishments_in_range(target_matricula, start_date, end_date); total_punishments = len(punishments); self.lbl_total_punishments.config(text=f"Total Punições: {total_punishments}"); [self.punishment_listbox.insert(tk.END, f"{datetime.strptime(p['data_punicao'], '%Y-%m-%d').strftime('%d/%m/%Y')} - {format_minutes_to_hms(p['minutos_descontados'])} - {p.get('motivo','Sem motivo')}") for p in punishments if p.get('data_punicao')]
-        elif hasattr(self, 'punishment_listbox'):
+        elif hasattr(self, 'punishment_listbox'): 
             self.punishment_listbox.delete(0, tk.END); self.lbl_total_punishments.config(text="Total Punições: --")
 
+    # AJUSTE 2: Nova função para exportar o panorama
     def on_export_panorama(self):
         selected_func_str = self.cmb_filter_func.get()
         start_date = self.selected_start_date
@@ -2380,7 +1525,7 @@ class App:
         if not start_date or not end_date:
             messagebox.showerror("Erro", "Selecione um período válido (Data Início e Fim).")
             return
-
+            
         if not selected_func_str:
             messagebox.showerror("Erro", "Selecione um funcionário.")
             return
@@ -2392,32 +1537,34 @@ class App:
 
         target_matricula = selected_func_str.split(" - ")[0] if selected_func_str != "Todos" else "Todos"
         nome_func = " ".join(selected_func_str.split(" - ")[1:]) if selected_func_str != "Todos" else "Todos_Funcionarios"
-
+        
         filepath = filedialog.asksaveasfilename(
-            defaultextension=".pdf",
-            filetypes=[("PDF files", "*.pdf")],
-            title="Salvar Espelho de Ponto",
+            defaultextension=".pdf", 
+            filetypes=[("PDF files", "*.pdf")], 
+            title="Salvar Espelho de Ponto", 
             initialfile=f"Espelho_Ponto_{nome_func.replace(' ','_')}_{start_date.isoformat()}_a_{end_date.isoformat()}.pdf"
         )
         if not filepath:
             return
 
         try:
+            # Usar paisagem (landscape) para caber as colunas
             doc = SimpleDocTemplate(filepath, pagesize=landscape(A4), rightMargin=1.5*cm, leftMargin=1.5*cm, topMargin=1.5*cm, bottomMargin=1.5*cm)
             styles = getSampleStyleSheet()
             story = []
 
+            # Estilos
             style_title = styles['h1']
             style_title.alignment = TA_CENTER
             style_title.textColor = colors.teal
-
+            
             style_header = styles['h2']
             style_header.fontSize = 10
             style_header.alignment = TA_LEFT
-
+            
             style_body = styles['Normal']
             style_body.fontSize = 8
-
+            
             style_table_header = styles['Normal']
             style_table_header.fontSize = 8
             style_table_header.fontName = 'Helvetica-Bold'
@@ -2426,29 +1573,29 @@ class App:
             style_table_body = styles['Normal']
             style_table_body.fontSize = 7
             style_table_body.alignment = TA_CENTER
-
+            
             style_nome = TableStyle([('ALIGN', (0,0), (0,0), 'LEFT'),
                                      ('ALIGN', (1,0), (1,0), 'RIGHT')])
-
+            
+            # --- Cabeçalho ---
             if LOGO_PATH.exists():
                 story.append(Image(LOGO_PATH, width=3*cm, height=3*cm, hAlign='LEFT'))
                 story.append(Spacer(1, 0.2*cm))
 
             story.append(Paragraph("Espelho de Ponto", style_title))
             story.append(Spacer(1, 1*cm))
-
+            
+            # --- Informações ---
             story.append(Paragraph(f"<b>Período:</b> {start_date.strftime('%d/%m/%Y')} a {end_date.strftime('%d/%m/%Y')}", styles['Normal']))
-
+            
             if target_matricula != "Todos":
                 story.append(Paragraph(f"<b>Funcionário:</b> {nome_func} (Mat. {target_matricula})", styles['Normal']))
                 story.append(Spacer(1, 0.5*cm))
-
-                last_bh_saldo = self.lbl_saldo_bh_total.cget('text')
-                last_extras = self.lbl_saldo_extras_total.cget('text')
-
+                
+                # Tabela de Saldos
                 saldo_data = [
-                    [Paragraph(f"<b>BH Saldo Final ({end_date.strftime('%d/%m')}):</b> {last_bh_saldo}", style_header),
-                     Paragraph(f"<b>Extras ({end_date.strftime('%d/%m')}):</b> {last_extras}", style_header),
+                    [Paragraph(f"<b>BH:</b> {self.lbl_saldo_bh_total.cget('text')}", style_header),
+                     Paragraph(f"<b>Extras:</b> {self.lbl_saldo_extras_total.cget('text')}", style_header),
                      Paragraph(f"<b>Fichado:</b> {self.lbl_fichado_status.cget('text')}", style_header),
                      Paragraph(f"<b>Setor:</b> {self.lbl_setor_status.cget('text')}", style_header)]
                 ]
@@ -2458,24 +1605,27 @@ class App:
 
             story.append(Spacer(1, 1*cm))
 
+            # --- Tabela de Dados ---
+            # ("Matrícula", "Nome", "Data", "E1", "S1", "E2", "S2", "Carga_Horaria", "Punição", "Total_Desconto")
             col_headers = ["Mat.", "Nome", "Data", "E1", "S1", "E2", "S2", "Carga", "Punição", "Desconto"]
             table_data = [[Paragraph(h, style_table_header) for h in col_headers]]
-
+            
             col_widths = [1.8*cm, 5.5*cm, 2.5*cm, 1.8*cm, 1.8*cm, 1.8*cm, 1.8*cm, 2.5*cm, 2.5*cm, 2.5*cm]
 
             for item_id in data_rows:
                 values = self.tree_viewer.item(item_id, 'values')
+                # Formata os dados para o PDF
                 row_data = [
-                    Paragraph(values[0], style_table_body),
-                    Paragraph(values[1], style_table_body),
-                    Paragraph(values[2], style_table_body),
-                    Paragraph(values[3], style_table_body),
-                    Paragraph(values[4], style_table_body),
-                    Paragraph(values[5], style_table_body),
-                    Paragraph(values[6], style_table_body),
-                    Paragraph(values[7], style_table_body),
-                    Paragraph(values[8], style_table_body),
-                    Paragraph(values[9], style_table_body),
+                    Paragraph(values[0], style_table_body), # Matrícula
+                    Paragraph(values[1], style_table_body), # Nome
+                    Paragraph(values[2], style_table_body), # Data
+                    Paragraph(values[3], style_table_body), # E1
+                    Paragraph(values[4], style_table_body), # S1
+                    Paragraph(values[5], style_table_body), # E2
+                    Paragraph(values[6], style_table_body), # S2
+                    Paragraph(values[7], style_table_body), # Carga_Horaria
+                    Paragraph(values[8], style_table_body), # Punição
+                    Paragraph(values[9], style_table_body), # Total_Desconto
                 ]
                 table_data.append(row_data)
 
@@ -2486,11 +1636,12 @@ class App:
                 ('GRID', (0,0), (-1,-1), 1, colors.black),
                 ('BOX', (0,0), (-1,-1), 1, colors.black),
                 ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-                ('ALIGN', (0,1), (0,-1), 'LEFT'),
-                ('ALIGN', (1,1), (1,-1), 'LEFT'),
+                ('ALIGN', (0,1), (0,-1), 'LEFT'), # Alinha matrícula à esquerda
+                ('ALIGN', (1,1), (1,-1), 'LEFT'), # Alinha nome à esquerda
             ]))
             story.append(t)
-
+            
+            # --- Assinatura (se for funcionário único) ---
             if target_matricula != "Todos":
                 story.append(Spacer(1, 2.5*cm))
                 story.append(Paragraph("________________________________________", styles['Normal']))
@@ -2499,18 +1650,18 @@ class App:
 
             doc.build(story)
             messagebox.showinfo("Sucesso", f"Espelho de Ponto salvo:\n{filepath}")
-
+        
         except PermissionError:
              messagebox.showerror("Erro", f"Erro de Permissão.\nO arquivo '{filepath}' pode estar aberto. Feche-o e tente novamente.")
         except Exception as e:
             messagebox.showerror("Erro PDF", f"Não foi possível gerar o PDF: {e}")
             self.append_log(f"ERRO PDF: {e}")
-
+            
     def append_log(self, text):
-        if hasattr(self, 'log_area'):
-            self.log_area.insert(tk.END, f"{datetime.now().strftime('%H:%M:%S')} - {text}\n");
+        if hasattr(self, 'log_area'): 
+            self.log_area.insert(tk.END, f"{datetime.now().strftime('%H:%M:%S')} - {text}\n"); 
             self.log_area.see(tk.END)
-        else:
+        else: 
             print(text)
 
     def start_in_place_edit(self, event):
@@ -2521,15 +1672,9 @@ class App:
         try: col_index = int(column_id.replace('#', '')) - 1 ; column_name = self.tree_viewer.heading(column_id, 'text')
         except: self.append_log(f"Erro edição: coluna."); return
         editable_columns = ["E1", "S1", "E2", "S2"];
-        if column_name not in editable_columns: return
-        x, y, width, height = self.tree_viewer.bbox(item_id, column_id); values = self.tree_viewer.item(item_id, 'values'); matricula, data_ptbr, current_time = values[0], values[2], values[col_index]
-        data_db = datetime.strptime(data_ptbr, "%d/%m/%Y").strftime("%Y-%m-%d");
-
-        if data_db < SYSTEM_START_DATE:
-            self.append_log(f"Edição bloqueada. Data {data_db} é anterior ao início do sistema ({SYSTEM_START_DATE}).")
-            return
-
-        entry_edit = ttk.Entry(self.tree_viewer); entry_edit.place(x=x, y=y, width=width, height=height)
+        if column_name not in editable_columns: return 
+        x, y, width, height = self.tree_viewer.bbox(item_id, column_id); values = self.tree_viewer.item(item_id, 'values'); matricula, data_ptbr, current_time = values[0], values[2], values[col_index] 
+        data_db = datetime.strptime(data_ptbr, "%d/%m/%Y").strftime("%Y-%m-%d"); entry_edit = ttk.Entry(self.tree_viewer); entry_edit.place(x=x, y=y, width=width, height=height)
         entry_edit.insert(0, current_time if current_time not in ('', 'N/A') else ''); entry_edit.focus(); justificativa_cmb = ttk.Combobox(self.tree_viewer, values=LISTA_JUSTIFICATIVAS, state="readonly", width=30); justificativa_cmb.place(x=x + width + 5, y=y, height=height)
         edit_key = (matricula, data_db); justificativa_cmb.set(self.unsaved_edits.get(edit_key, {}).get('justificativa', LISTA_JUSTIFICATIVAS[0])); self.editing_widgets = {'entry': entry_edit, 'cmb': justificativa_cmb}
         def on_escape(e=None):
@@ -2540,7 +1685,7 @@ class App:
             if not entry or not cmb: return
             new_time, just = entry.get().strip(), cmb.get()
             if not (re.match(r'^\d{2}:\d{2}$', new_time) or new_time in ('', 'N/A', '00:00')):
-                if new_time != current_time: messagebox.showerror("Erro Formato", "Formato de hora inválido. Use HH:MM.", parent=self.root); on_escape(); return
+                if new_time != current_time: messagebox.showerror("Erro Formato", "HH:MM.", parent=self.root); on_escape(); return
             temp_vals = list(self.tree_viewer.item(item_id, 'values')); temp_vals[col_index] = new_time; self.tree_viewer.item(item_id, values=tuple(temp_vals))
             if edit_key not in self.unsaved_edits: current_row_values = self.tree_viewer.item(item_id, 'values'); self.unsaved_edits[edit_key] = {'E1': current_row_values[3], 'S1': current_row_values[4], 'E2': current_row_values[5], 'S2': current_row_values[6]}
             self.unsaved_edits[edit_key][column_name] = new_time; self.unsaved_edits[edit_key]['justificativa'] = just; self.update_visual_work_hours(item_id)
@@ -2550,37 +1695,17 @@ class App:
     def update_visual_work_hours(self, item_id):
         values = self.tree_viewer.item(item_id, 'values'); matricula = values[0]; data_ptbr = values[2]; data_db = datetime.strptime(data_ptbr, "%d/%m/%Y").strftime("%Y-%m-%d")
         all_times_raw = [values[3], values[4], values[5], values[6]]; func_info = self.db.get_funcionario_info(matricula); sector = func_info.get('setor', 'N/D'); minutos_totais = 0
-        deducao_total_dia = 0
-        periodos_calculados = []
-
         for i in range(0, 4, 2):
             e_time, s_time = all_times_raw[i], all_times_raw[i+1]
             if e_time and s_time and e_time not in ('N/A', '00:00', '') and s_time not in ('N/A', '00:00', ''):
                 try:
-                    entrada = datetime.strptime(f"{data_db} {e_time}", "%Y-%m-%d %H:%M");
-                    saida = datetime.strptime(f"{data_db} {s_time}", "%Y-%m-%d %H:%M")
+                    entrada = datetime.strptime(f"{data_db} {e_time}", "%Y-%m-%d %H:%M"); saida = datetime.strptime(f"{data_db} {s_time}", "%Y-%m-%d %H:%M")
                     if saida < entrada: saida += timedelta(days=1)
                     turno = "Manhã" if i == 0 else "Tarde"; jornada_inicio = datetime.strptime(f"{data_db} {'07:30' if turno == 'Manhã' else '13:00'}", "%Y-%m-%d %H:%M")
-                    late_min = max(0, (entrada - jornada_inicio).total_seconds() / 60); deduction_min = calculate_deduction(late_min, sector)
-                    bruto_min = (saida - entrada).total_seconds() / 60; liquido_min = max(0, bruto_min - deduction_min);
-                    minutos_totais += liquido_min
-                    deducao_total_dia += deduction_min
-                    periodos_calculados.append({
-                        "entrada": str(entrada), "saida": str(saida),
-                        "minutos_brutos": format_minutes_to_hms(bruto_min),
-                        "deducao_minutos": format_minutes_to_hms(deduction_min),
-                        "minutos_liquidos": format_minutes_to_hms(liquido_min)
-                    })
+                    late_min = max(0, (entrada - jornada_inicio).total_seconds() / 60); deduction_min = calculate_deduction(late_min, sector) 
+                    bruto_min = (saida - entrada).total_seconds() / 60; liquido_min = max(0, bruto_min - deduction_min); minutos_totais += liquido_min
                 except ValueError: continue
-        new_values = list(values);
-        new_values[7] = format_minutes_to_hms(minutos_totais)
-        new_values[9] = format_minutes_to_hms(deducao_total_dia)
-        self.tree_viewer.item(item_id, values=tuple(new_values))
-
-        edit_key = (matricula, data_db)
-        if edit_key in self.unsaved_edits:
-            self.unsaved_edits[edit_key]['periodos_recalculados'] = periodos_calculados
-
+        new_values = list(values); new_values[7] = format_minutes_to_hms(minutos_totais); self.tree_viewer.item(item_id, values=tuple(new_values))
 
     def process_manual_update_and_save(self, matricula, data_db, all_times_raw, justificativa):
         func_info = self.db.get_funcionario_info(matricula); sector = func_info.get('setor', 'N/D'); periodos, minutos_totais = [], 0
@@ -2588,67 +1713,26 @@ class App:
             e_time, s_time = all_times_raw[i], all_times_raw[i+1]
             if e_time and s_time and e_time not in ('N/A', '00:00', '') and s_time not in ('N/A', '00:00', ''):
                 try:
-                    entrada = datetime.strptime(f"{data_db} {e_time}", "%Y-%m-%d %H:%M");
-                    saida = datetime.strptime(f"{data_db} {s_time}", "%Y-%m-%d %H:%M")
+                    entrada = datetime.strptime(f"{data_db} {e_time}", "%Y-%m-%d %H:%M"); saida = datetime.strptime(f"{data_db} {s_time}", "%Y-%m-%d %H:%M")
                     if saida < entrada: saida += timedelta(days=1)
                     turno = "Manhã" if i == 0 else "Tarde"; jornada_inicio = datetime.strptime(f"{data_db} {'07:30' if turno == 'Manhã' else '13:00'}", "%Y-%m-%d %H:%M")
-                    late_min = max(0, (entrada - jornada_inicio).total_seconds() / 60); deduction_min = calculate_deduction(late_min, sector)
-                    bruto_min = (saida - entrada).total_seconds() / 60; liquido_min = max(0, bruto_min - deduction_min);
-                    minutos_totais += liquido_min
-                    periodos.append({
-                        "entrada": str(entrada), "saida": str(saida),
-                        "minutos_brutos": format_minutes_to_hms(bruto_min),
-                        "deducao_minutos": format_minutes_to_hms(deduction_min),
-                        "minutos_liquidos": format_minutes_to_hms(liquido_min)
-                    })
-                except ValueError:
-                    self.append_log(f"ERRO ao salvar formato de hora '{e_time}' ou '{s_time}' para {matricula} em {data_db}."); continue
-        self.db.insert_horas_trabalhadas({
-            "matricula": matricula,
-            "data": data_db,
-            "minutos_totais": format_minutes_to_hms(minutos_totais),
-            "periodos": periodos
-        }, justificativa=justificativa)
+                    late_min = max(0, (entrada - jornada_inicio).total_seconds() / 60); deduction_min = calculate_deduction(late_min, sector) 
+                    bruto_min = (saida - entrada).total_seconds() / 60; liquido_min = max(0, bruto_min - deduction_min); minutos_totais += liquido_min
+                    periodos.append({"entrada": str(entrada), "saida": str(saida), "minutos_brutos": format_minutes_to_hms(bruto_min), "deducao_minutos": format_minutes_to_hms(deduction_min), "minutos_liquidos": format_minutes_to_hms(liquido_min)})
+                except ValueError: self.append_log(f"ERRO formato '{e_time}' ou '{s_time}'."); continue
+        self.db.insert_horas_trabalhadas({"matricula": matricula, "data": data_db, "minutos_totais": format_minutes_to_hms(minutos_totais), "periodos": periodos}, justificativa=justificativa)
         self.append_log(f"Ponto {matricula} {data_db} atualizado. Just: '{justificativa}'.")
 
-
-    def commit_all_changes(self, from_exit=False):
+    def commit_all_changes(self):
         if self.editing_widgets: [w.event_generate('<FocusOut>') for k, w in self.editing_widgets.items() if k == 'entry']
-        if not self.unsaved_edits:
-            if not from_exit:
-                messagebox.showinfo("Salvar", "Nenhuma alteração.")
-            return
-
-        if not from_exit:
-            if not messagebox.askyesno("Confirmar", f"{len(self.unsaved_edits)} dia(s) alterados. Salvar e recalcular?"):
-                return
-
+        if not self.unsaved_edits: messagebox.showinfo("Salvar", "Nenhuma alteração."); return
+        if not messagebox.askyesno("Confirmar", f"{len(self.unsaved_edits)} dia(s) alterados. Salvar e recalcular?"): return
         self.append_log(f"Salvando {len(self.unsaved_edits)} alterações..."); affected_employees = set()
-        for (matricula, data_db), edits in self.unsaved_edits.items():
-            affected_employees.add(matricula);
-            justificativa = edits.get('justificativa', 'Ajuste Manual');
-            self.process_manual_update_and_save(matricula, data_db, [edits['E1'], edits['S1'], edits['E2'], edits['S2']], justificativa)
+        for (matricula, data_db), edits in self.unsaved_edits.items(): affected_employees.add(matricula); justificativa = edits.get('justificativa', 'Ajuste Manual'); self.process_manual_update_and_save(matricula, data_db, [edits['E1'], edits['S1'], edits['E2'], edits['S2']], justificativa)
+        self.append_log("Recalculando saldos..."); [self.db.recalculate_full_balance_for_employee(mat) for mat in affected_employees]
+        self.unsaved_edits = {}; messagebox.showinfo("Sucesso", "Alterações salvas e saldos recalculados.")
+        self.load_point_viewer(force_reload=True); self._update_calendar_tags() 
 
-        self.append_log("Recalculando saldos...");
-        recalc_errors = 0
-        for mat in affected_employees:
-             try:
-                self.db.recalculate_full_balance_for_employee(mat)
-             except Exception as e:
-                self.append_log(f"ERRO ao recalcular saldo para {mat} após salvar edições: {e}")
-                recalc_errors += 1
-
-        self.unsaved_edits = {}
-
-        if not from_exit:
-            if recalc_errors == 0:
-                messagebox.showinfo("Sucesso", "Alterações salvas e saldos recalculados.")
-            else:
-                messagebox.showwarning("Atenção", f"Alterações salvas, mas ocorreram {recalc_errors} erro(s) durante o recálculo.\nVerifique o log.")
-            self.load_point_viewer(force_reload=True); self._update_calendar_tags()
-
-
-# --- Ponto de Entrada Principal ---
 if __name__ == "__main__":
     root = tk.Tk()
     app = App(root)
