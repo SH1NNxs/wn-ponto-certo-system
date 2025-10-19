@@ -48,7 +48,7 @@ MINUTOS_JORNADA_SABADO = 4 * 60
 MINUTOS_UNIDADE_EXTRA = 4 * 60
 
 LISTA_JUSTIFICATIVAS = ["Ajuste Manual (Erro Batida)", "Início Externo", "Atestado Médico", "Saída Justificada", "Esquecimento Batida"]
-LISTA_SETORES = ["Operacional", "Administrativo", "N/D"]
+LISTA_SETORES = ["Produtivo", "Administrativo", "N/D"]
 LISTA_FICHADO = ["Sim", "Não"]
 LISTA_TIPO_FERIADO = ["Nacional", "Estadual", "Municipal", "Ponto Facultativo"]
 
@@ -60,45 +60,46 @@ def try_parse_datetime(s, format_to_try="%Y-%m-%d %H:%M:%S"):
             try: return datetime.strptime(s, "%Y/%m/%d %H:%M")
             except: return None
 
-# --- FUNÇÃO calculate_deduction ATUALIZADA (NOVAMENTE) ---
+# Função calculate_deduction (revisada e correta conforme última solicitação)
 def calculate_deduction(minutes_late, sector=None):
     minutes_late = max(0, minutes_late)
 
-    # Regra 1: <= 5 minutos de atraso = 0 desconto
+    # Regra 1: <= 5 minutos de atraso = 0 desconto (Aplica-se a ambos)
     if minutes_late <= 5:
         return 0
 
     # Regra 2: Regras específicas por setor
     if sector == "Administrativo":
         if minutes_late <= 15:
-            # Atraso * 2
+            # Atraso * 2 (Ex: 15 min -> 30 min desconto)
             return minutes_late * 2
         elif minutes_late <= 30:
-            # (Primeiros 15 min * 2) + (Excedente * 2) -> Total 60 min para 30 min de atraso
-            penalty_first_15 = 15 * 2
+            # Fórmula que resulta em 60 min aos 30 min de atraso
+            penalty_first_15 = 15 * 2 # 30 min
             penalty_next_minutes = (minutes_late - 15) * 2
-            return penalty_first_15 + penalty_next_minutes
+            return penalty_first_15 + penalty_next_minutes # Total 60 min para 30 min de atraso
         else: # minutes_late > 30
-            # Base de 60 min + (Excedente * 1)
-            penalty_first_30 = 60 # (15*2) + (15*2)
+            # 60 min base + (atraso - 30 min)
+            penalty_first_30 = 60 # Penalidade para os primeiros 30 minutos
             penalty_exceeding = (minutes_late - 30) * 1
             return penalty_first_30 + penalty_exceeding
 
-    elif sector == "Operacional":
+    elif sector == "Produtivo":
         if minutes_late <= 15:
-            # Atraso * 3
+            # Atraso * 3 (Ex: 15 min -> 45 min desconto)
             return minutes_late * 3
         elif minutes_late <= 30:
-            # --- NOVA LÓGICA ESPECÍFICA SOLICITADA ---
-            # (Primeiros 15 min * 3) + (Minutos 16 a 30 * 2) -> Total 75 min para 30 min de atraso
+            # --- LÓGICA ALTERADA PARA PRODUTIVO ---
+            # Precisa resultar em 60 min aos 30 min de atraso.
             penalty_first_15 = 15 * 3 # 45 minutos
-            penalty_next_minutes = (minutes_late - 15) * 2 # Ex: (30-15)*2 = 15*2 = 30 min
-            return penalty_first_15 + penalty_next_minutes # Total = 45 + 30 = 75 min
+            # Os minutos entre 16 e 30 têm multiplicador 1
+            penalty_next_minutes = (minutes_late - 15) * 1
+            return penalty_first_15 + penalty_next_minutes # Para 30 min: 45 + (15*1) = 60 min. Correto.
         else: # minutes_late > 30
-            # --- NOVA BASE PARA > 30 min ---
-            # Base de 75 min (calculada acima para 30 min) + (Excedente * 1)
-            penalty_first_30 = 75 # (15*3) + (15*2)
-            penalty_exceeding = (minutes_late - 30) * 1
+            # --- LÓGICA ALTERADA PARA PRODUTIVO ---
+            # Base de 60 min para os primeiros 30 min + (atraso - 30 min)
+            penalty_first_30 = 60 # Penalidade baseada no cálculo anterior para 30 min.
+            penalty_exceeding = (minutes_late - 30) * 1 # Multiplicador 1 após 30 min.
             return penalty_first_30 + penalty_exceeding
 
     else: # Caso padrão (setor 'N/D' ou None) - Usar regras do Produtivo como default
@@ -106,13 +107,12 @@ def calculate_deduction(minutes_late, sector=None):
             return minutes_late * 3
         elif minutes_late <= 30:
             penalty_first_15 = 15 * 3
-            penalty_next_minutes = (minutes_late - 15) * 2 # Multiplicador 2 para 16-30 min
+            penalty_next_minutes = (minutes_late - 15) * 1
             return penalty_first_15 + penalty_next_minutes
         else:
-            penalty_first_30 = 75 # Base 75 min
+            penalty_first_30 = 60
             penalty_exceeding = (minutes_late - 30) * 1
             return penalty_first_30 + penalty_exceeding
-# --- FIM DA FUNÇÃO calculate_deduction ATUALIZADA ---
 
 def format_minutes_to_hms(minutes):
     if minutes is None: return "00:00:00"
@@ -152,8 +152,6 @@ def parse_hhmm_to_minutes(time_str):
         return 0
 
 # --- Classe DatabaseManager ---
-# [O restante da classe DatabaseManager permanece idêntico ao código anterior]
-# ... (código da classe DatabaseManager omitido para brevidade, mas inclui a correção do NameError) ...
 class DatabaseManager:
     def __init__(self, db_path=None):
         self.db_path = str(db_path if db_path else DEFAULT_DB)
@@ -788,6 +786,7 @@ class DatabaseManager:
 
 
 # --- Função import_glog_txt ---
+# --- AJUSTE NA LÓGICA DE CÁLCULO DO TEMPO LÍQUIDO ---
 def import_glog_txt(filepath, db_manager, logger=print):
     employees_points_raw = defaultdict(lambda: defaultdict(list))
     unique_employees = set()
@@ -858,7 +857,7 @@ def import_glog_txt(filepath, db_manager, logger=print):
                 jornada_inicio = datetime.strptime(f"{data} {'07:30' if turno == 'Manhã' else '13:00'}", "%Y-%m-%d %H:%M")
 
                 minutes_late = max(0, (entrada - jornada_inicio).total_seconds() / 60)
-                delay_deduction_minutes = calculate_deduction(minutes_late, sector) # Usa a função corrigida
+                delay_deduction_minutes = calculate_deduction(minutes_late, sector)
 
                 # --- NOVA LÓGICA DE CÁLCULO LÍQUIDO ---
                 inicio_efetivo = jornada_inicio + timedelta(minutes=delay_deduction_minutes)
@@ -898,8 +897,6 @@ def import_glog_txt(filepath, db_manager, logger=print):
 
 
 # --- Classe DateRangePicker ---
-# [A classe DateRangePicker permanece idêntica ao código anterior]
-# ... (código da classe DateRangePicker omitido para brevidade) ...
 class DateRangePicker:
     """Um widget de calendário reutilizável que seleciona um intervalo de datas."""
     def __init__(self, parent, bg_color, style_colors):
@@ -995,9 +992,8 @@ class DateRangePicker:
     def get_dates(self):
         return self.selected_start_date, self.selected_end_date
 
+
 # --- Classe App ---
-# [A classe App permanece idêntica ao código anterior, já com as correções de saldo e NameError]
-# ... (código da classe App e suas funções internas omitido para brevidade, mas inclui as correções anteriores) ...
 class App:
     def __init__(self, root):
         self.db = DatabaseManager()
@@ -1176,7 +1172,7 @@ class App:
 
         frame_fichado = tk.Frame(frame_form, bg=self.BG_COLOR); frame_fichado.pack(fill='x', pady=5); tk.Label(frame_fichado, text="É Fichado?", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 10, "bold"), width=15, anchor='w').pack(side=tk.LEFT); cmb_fichado = ttk.Combobox(frame_fichado, values=LISTA_FICHADO, state="readonly", width=20); cmb_fichado.pack(side=tk.LEFT); cmb_fichado.set("Sim")
 
-        frame_setor = tk.Frame(frame_form, bg=self.BG_COLOR); frame_setor.pack(fill='x', pady=5); tk.Label(frame_setor, text="Setor:", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 10, "bold"), width=15, anchor='w').pack(side=tk.LEFT); cmb_setor = ttk.Combobox(frame_setor, values=LISTA_SETORES, state="readonly", width=20); cmb_setor.pack(side=tk.LEFT); cmb_setor.set("Operacional")
+        frame_setor = tk.Frame(frame_form, bg=self.BG_COLOR); frame_setor.pack(fill='x', pady=5); tk.Label(frame_setor, text="Setor:", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 10, "bold"), width=15, anchor='w').pack(side=tk.LEFT); cmb_setor = ttk.Combobox(frame_setor, values=LISTA_SETORES, state="readonly", width=20); cmb_setor.pack(side=tk.LEFT); cmb_setor.set("Produtivo")
 
         frame_bh = tk.Frame(frame_form, bg=self.BG_COLOR); frame_bh.pack(fill='x', pady=5); tk.Label(frame_bh, text="BH Inicial (HH:MM):", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 10, "bold"), width=15, anchor='w').pack(side=tk.LEFT); entry_bh_inicial = ttk.Entry(frame_bh, width=22); entry_bh_inicial.pack(side=tk.LEFT); entry_bh_inicial.insert(0, "00:00")
 
@@ -2624,6 +2620,7 @@ class App:
             if from_cmb: on_escape()
         entry_edit.bind('<Return>', lambda e: handle_edit(from_cmb=True)); entry_edit.bind('<Escape>', on_escape); entry_edit.bind('<FocusOut>', lambda e: on_escape()); justificativa_cmb.bind('<<ComboboxSelected>>', lambda e: handle_edit(from_cmb=True)); justificativa_cmb.bind('<Escape>', on_escape)
 
+    # --- AJUSTE NA LÓGICA DE CÁLCULO VISUAL DO TEMPO LÍQUIDO ---
     def update_visual_work_hours(self, item_id):
         values = self.tree_viewer.item(item_id, 'values'); matricula = values[0]; data_ptbr = values[2]; data_db = datetime.strptime(data_ptbr, "%d/%m/%Y").strftime("%Y-%m-%d")
         all_times_raw = [values[3], values[4], values[5], values[6]]; func_info = self.db.get_funcionario_info(matricula); sector = func_info.get('setor', 'N/D'); minutos_totais_liquidos = 0
@@ -2676,7 +2673,7 @@ class App:
             self.unsaved_edits[edit_key]['periodos_recalculados'] = periodos_calculados
     # --- FIM DO AJUSTE VISUAL ---
 
-
+    # --- AJUSTE NA LÓGICA DE CÁLCULO DO TEMPO LÍQUIDO AO SALVAR ---
     def process_manual_update_and_save(self, matricula, data_db, all_times_raw, justificativa):
         func_info = self.db.get_funcionario_info(matricula); sector = func_info.get('setor', 'N/D'); periodos, minutos_totais = [], 0
         for i in range(0, 4, 2):
