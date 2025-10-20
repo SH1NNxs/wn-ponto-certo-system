@@ -30,8 +30,26 @@ except ImportError:
 # -------------------------
 # BANCO DE DADOS (SQLite)
 # -------------------------
-DEFAULT_DB = Path(__file__).parent.joinpath("ponto.db")
-LOGO_PATH = Path(__file__).parent.joinpath("wn_logo.png")
+
+if getattr(sys, 'frozen', False):
+    # Estamos rodando como um .exe (compilado)
+    
+    # O BD deve ficar ao lado do .exe (na pasta 'dist')
+    base_path_persistente = Path(sys.executable).parent
+    
+    # O Logo foi extraído para a pasta temporária (_MEIPASS)
+    base_path_asset = Path(__file__).parent
+else:
+    # Estamos rodando como um script .py (desenvolvimento)
+    # Tudo está na mesma pasta
+    base_path_persistente = Path(__file__).parent
+    base_path_asset = Path(__file__).parent
+
+# O Banco de Dados é PERSISTENTE
+DEFAULT_DB = base_path_persistente.joinpath("ponto.db")
+
+# O Logo é um ASSET (incluído com --add-data)
+LOGO_PATH = base_path_asset.joinpath("wn_logo.png")
 
 # -------------------------
 # CONSTANTES E FUNÇÕES DE APOIO
