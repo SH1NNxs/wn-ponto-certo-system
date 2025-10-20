@@ -1,85 +1,85 @@
+=====================================
+README - Projeto "WN Ponto Certo"
+=====================================
 
-# README - Projeto "WN Ponto Certo"
+Este documento serve como um guia rápido para futuras manutenções e atualizações do sistema WN Ponto Certo.
 
-Este documento serve como um guia rápido para futuras manutenções e atualizações do sistema `WN Ponto Certo`.
+------------------------
+Visao Geral do Projeto
+------------------------
 
-## Visão Geral do Projeto
+- Linguagem: Python
+- Interface: Tkinter
+- Compilador: PyInstaller
+- Bibliotecas Externas:
+    - Pillow (para imagens)
+    - reportlab (para relatórios PDF)
+    - tkcalendar (para os widgets de calendário)
+- Arquivos Externos (Incluídos no .exe):
+    - wn_logo.png (usado nos relatórios PDF)
+    - wn_logo.ico (usado no ícone da janela e do arquivo .exe)
 
-  * **Linguagem:** Python
-  * **Interface:** Tkinter
-  * **Compilador:** PyInstaller
-  * **Bibliotecas Externas:**
-      * `Pillow` (para imagens)
-      * `reportlab` (para relatórios PDF)
-      * `tkcalendar` (para os widgets de calendário)
-  * **Arquivos Externos (Incluídos no `.exe`):**
-      * `wn_logo.png` (usado nos relatórios)
+-------------------------------------------
+Como Fazer uma Manutencao (Atualizar o Programa)
+-------------------------------------------
 
------
+Siga este passo a passo TODA VEZ que precisar corrigir um bug ou adicionar uma nova funcionalidade.
 
-## Como Fazer uma Manutenção (Atualizar o Programa)
+LEMBRETE: O arquivo .exe é um pacote fechado. Voce nao pode simplesmente trocar o script; voce precisa GERAR UM NOVO .exe com o script atualizado.
 
-Siga este passo a passo **toda vez** que precisar corrigir um bug ou adicionar uma nova funcionalidade.
+Passo 1: Edicao do Codigo
+1. Faça todas as alteracoes desejadas diretamente no arquivo wn_ponto_certo.py.
+2. Salve o arquivo.
 
-**Lembrete:** O arquivo `.exe` é um pacote fechado. Você não pode simplesmente trocar o script; você precisa **gerar um novo `.exe`** com o script atualizado.
+Passo 2: Ativacao do Ambiente
+1. Abra um terminal (CMD ou PowerShell) na pasta raiz do projeto (ex: C:\...\projeto_ponto\).
+2. Ative o ambiente virtual (venv). Se voce nao o ativou, o PyInstaller nao encontrará as bibliotecas.
 
-### Passo 1: Edição do Código
+   .\venv\Scripts\activate
 
-1.  Faça todas as alterações desejadas diretamente no arquivo `wn_ponto_certo.py`.
-2.  Salve o arquivo.
+3. Seu terminal deve agora mostrar (venv) no início da linha.
 
-### Passo 2: Ativação do Ambiente
+Passo 3: Geracao do Novo .exe
+1. Com o ambiente ativado e na pasta correta, execute o comando de compilacao abaixo.
+2. Este comando irá excluir os arquivos antigos (build/, dist/) e criar novos.
 
-1.  Abra um terminal (CMD ou PowerShell) na pasta raiz do projeto (ex: `C:\..._ponto\`).
-2.  Ative o ambiente virtual (venv). Se você não o ativou, o PyInstaller não encontrará as bibliotecas.
-    ```bash: .\venv\Scripts\activate
-    O Comando de Compilação (Obrigatório): pyinstaller --onefile --windowed --add-data "wn_logo.png;." --name "WN Ponto Certo" wn_ponto_certo.py
-    ```
-3.  Seu terminal deve agora mostrar `(venv)` no início da linha.
+*******************************************************************************
+*** O COMANDO DE COMPILACAO (OFICIAL) ***
 
-### Passo 3: Geração do Novo `.exe`
+pyinstaller --onefile --windowed --add-data "wn_logo.png;." --add-data "wn_logo.ico;." --icon="wn_logo.ico" --name "WN Ponto Certo" wn_ponto_certo.py
 
-1.  Com o ambiente ativado e na pasta correta, execute o comando de compilação abaixo.
-2.  Este comando irá excluir os arquivos antigos (`build/`, `dist/`) e criar novos.
+*******************************************************************************
 
-**O Comando de Compilação (Obrigatório):**
+Passo 4: Entrega ao Cliente
+1. Após o comando terminar, uma nova pasta "dist" será criada.
+2. Dentro da pasta "dist", voce encontrará o arquivo WN Ponto Certo.exe atualizado.
+3. Envie apenas este arquivo .exe para o seu cliente.
 
-```bash
-pyinstaller --onefile --windowed --add-data "wn_logo.png;." --name "WN Ponto Certo" wn_ponto_certo.py
-```
+------------------------
+Observacoes Importantes
+------------------------
 
-### Passo 4: Entrega ao Cliente
+- O Banco de Dados (ponto.db): O código foi ajustado (com 'sys.executable') para que o banco de dados seja salvo na MESMA PASTA do .exe (a pasta 'dist'), e nao em uma pasta temporária.
 
-1.  Após o comando terminar, uma nova pasta `dist` será criada.
-2.  Dentro da pasta `dist`, você encontrará o arquivo `WN Ponto Certo.exe` atualizado.
-3.  Envie **apenas este arquivo `.exe`** para o seu cliente.
+- Atualizacao Segura: Quando o cliente substituir o .exe antigo pelo novo, o banco de dados ponto.db dele permanecerá intacto. Ele nao perderá nenhum dado.
 
------
+- Arquivos do Projeto: Mantenha sempre os arquivos principais juntos na pasta raiz do projeto:
+    - wn_ponto_certo.py
+    - wn_logo.png
+    - wn_logo.ico
 
-## Observações Importantes
+------------------------
+Setup em um Novo Computador
+------------------------
 
-  * **O Banco de Dados:** O banco de dados (`ponto.db`) **NÃO** é incluído no `.exe`. Ele é criado (ou lido) na mesma pasta onde o cliente executa o programa.
-  * **Atualização Segura:** Quando o cliente substituir o `.exe` antigo pelo novo, o banco de dados `ponto.db` dele **permanecerá intacto**. Ele não perderá nenhum dado.
-  * **Arquivos do Projeto:** Mantenha sempre o `wn_ponto_certo.py` e o `wn_logo.png` juntos na pasta raiz do projeto. Não os mova para dentro da pasta `venv`.
+Se voce mover o projeto para um novo computador, precisará configurar o ambiente uma vez:
 
------
-
-## Setup em um Novo Computador
-
-Se você mover o projeto para um novo computador, precisará configurar o ambiente uma vez:
-
-1.  Instale o Python (versão 3.10 ou superior).
-2.  Abra o terminal na pasta do projeto.
-3.  Crie o ambiente virtual:
-    ```bash
-    python -m venv venv
-    ```
-4.  Ative o ambiente:
-    ```bash
-    .\venv\Scripts\activate
-    ```
-5.  Instale todas as dependências:
-    ```bash
-    pip install pyinstaller Pillow reportlab tkcalendar
-    ```
-6.  Agora você está pronto para seguir o fluxo de manutenção normal.
+1. Instale o Python (versao 3.10 ou superior).
+2. Abra o terminal na pasta do projeto.
+3. Crie o ambiente virtual:
+   python -m venv venv
+4. Ative o ambiente:
+   .\venv\Scripts\activate
+5. Instale todas as dependências:
+   pip install pyinstaller Pillow reportlab tkcalendar
+6. Agora voce esta pronto para seguir o fluxo de manutencao normal.
