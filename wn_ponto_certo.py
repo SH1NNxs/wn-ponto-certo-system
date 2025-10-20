@@ -51,6 +51,9 @@ DEFAULT_DB = base_path_persistente.joinpath("ponto.db")
 # O Logo é um ASSET (incluído com --add-data)
 LOGO_PATH = base_path_asset.joinpath("wn_logo.png")
 
+# O ÍCONE é um ASSET (também precisa ser incluído)
+LOGO_ICON_PATH = base_path_asset.joinpath("wn_logo.ico")
+
 # -------------------------
 # CONSTANTES E FUNÇÕES DE APOIO
 # -------------------------
@@ -1022,6 +1025,17 @@ class App:
         self.root = root
         self.root.state('zoomed')
         self.root.title("WN Ponto Certo")
+        # ... (linha anterior)
+        self.root.title("WN Ponto Certo")
+
+        # Define o ícone da janela e da barra de tarefas
+        try:
+            self.root.iconbitmap(LOGO_ICON_PATH)
+        except Exception as e:
+            print(f"Aviso: Não foi possível carregar o ícone: {e}")
+            
+        self.root.configure(bg="#0a192f")
+        # ... (resto do código)
         self.root.configure(bg="#0a192f")
         self.root.minsize(1200, 700)
 
