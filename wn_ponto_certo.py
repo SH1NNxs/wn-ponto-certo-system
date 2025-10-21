@@ -2,12 +2,13 @@ import os
 import tkinter as tk
 from tkinter import filedialog, scrolledtext, messagebox, ttk
 from collections import defaultdict
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, time
 import sqlite3
 import json
 from pathlib import Path
 from tkcalendar import Calendar
 import re
+import sys
 
 # Tenta importar bibliotecas necessárias
 try:
@@ -1736,6 +1737,32 @@ class App:
                 story.append(Paragraph(f"<b>Extras:</b> {int(func_info.get('extras_disponiveis', 0))}", styles['Normal']))
                 story.append(Paragraph(f"<b>Banco de Horas:</b> {format_minutes_to_hms(func_info.get('banco_horas', 0))}", styles['Normal']))
 
+                # --- INÍCIO DA MODIFICAÇÃO (FICHADO) ---
+                try:
+                    remaining_bh = func_info.get('banco_horas', 0)
+                    
+                    # --- AJUSTE SOLICITADO ---
+                    # Determina a data base para encontrar o próximo dia útil
+                    start_search_date = date.today() # Padrão
+                    if payment_details.get('pay_partial_salary') and payment_details.get('end_date'):
+                        start_search_date = payment_details['end_date']
+                    # --- FIM AJUSTE SOLICITADO ---
+
+                    # Esta função é para 'fichado', então is_fichado=True
+                    next_business_day = self.find_next_business_day(start_search_date, is_fichado=True)
+                    target_exit_time = self.calculate_bh_zero_exit(remaining_bh, next_business_day)
+                    
+                    story.append(Spacer(1, 0.5*cm))
+                    story.append(Paragraph("<b>Informação para Zerar Banco de Horas:</b>", styles['h2']))
+                    info_text = (f"Para zerar o saldo de BH, o horário de saída no próximo dia útil "
+                                 f"(<b>{next_business_day.strftime('%d/%m/%Y')}</b>) deverá ser às <b>{target_exit_time}</b>.")
+                    story.append(Paragraph(info_text, styles['Normal']))
+                
+                except Exception as e:
+                    print(f"Erro ao calcular saída para zerar BH (fichado): {e}")
+                    story.append(Paragraph("<i>Não foi possível calcular o horário para zerar o BH.</i>", styles['Italic']))
+                # --- FIM DA MODIFICAÇÃO ---
+
                 story.append(Spacer(1, 2.5*cm))
                 story.append(Paragraph("________________________________________", styles['Normal']))
                 story.append(Paragraph(nome, styles['Normal']))
@@ -1901,6 +1928,30 @@ class App:
                 story.append(Paragraph("<b>Saldos Remanescentes (Após Pagamento)</b>", styles['h2']))
                 story.append(Paragraph(f"<b>Banco de Horas:</b> {format_minutes_to_hms(func_info.get('banco_horas', 0))}", styles['Normal']))
                 story.append(Paragraph(f"<b>Extras:</b> {int(func_info.get('extras_disponiveis', 0))}", styles['Normal']))
+
+                # --- INÍCIO DA MODIFICAÇÃO (NÃO FICHADO) ---
+                try:
+                    remaining_bh = func_info.get('banco_horas', 0)
+                    
+                    # --- AJUSTE SOLICITADO ---
+                    # Para não fichado, a data base é sempre o fim do período de diárias
+                    start_search_date = payment_details['end_date']
+                    # --- FIM AJUSTE SOLICITADO ---
+
+                    # Esta função é para 'não fichado', então is_fichado=False
+                    next_business_day = self.find_next_business_day(start_search_date, is_fichado=False)
+                    target_exit_time = self.calculate_bh_zero_exit(remaining_bh, next_business_day)
+                    
+                    story.append(Spacer(1, 0.5*cm))
+                    story.append(Paragraph("<b>Informação para Zerar Banco de Horas:</b>", styles['h2']))
+                    info_text = (f"Para zerar o saldo de BH, o horário de saída no próximo dia útil "
+                                 f"(<b>{next_business_day.strftime('%d/%m/%Y')}</b>) deverá ser às <b>{target_exit_time}</b>.")
+                    story.append(Paragraph(info_text, styles['Normal']))
+                
+                except Exception as e:
+                    print(f"Erro ao calcular saída para zerar BH (não fichado): {e}")
+                    story.append(Paragraph("<i>Não foi possível calcular o horário para zerar o BH.</i>", styles['Italic']))
+                # --- FIM DA MODIFICAÇÃO ---
 
                 story.append(Spacer(1, 2.5*cm))
                 story.append(Paragraph("________________________________________", styles['Normal']))
@@ -2173,6 +2224,50 @@ class App:
                 story.append(t); doc.build(story); messagebox.showinfo("Sucesso", f"Relatório salvo:\n{filepath}", parent=win); win.destroy()
             except Exception as e: messagebox.showerror("Erro PDF", f"Erro: {e}", parent=win)
         btn_export.config(command=generate_pdf)
+
+    # --- INÍCIO DAS NOVAS FUNÇÕES ---
+    def find_next_business_day(self, start_date, is_fichado):
+        """Encontra o próximo dia útil (não-domingo, não-feriado se fichado)."""
+        current_date = start_date + timedelta(days=1)
+        while True:
+            weekday = current_date.weekday()
+            
+            # 1. Domingo NUNCA é dia útil
+            if weekday == 6:
+                current_date += timedelta(days=1)
+                continue
+
+            # 2. Verifica Feriado
+            is_holiday = self.db.is_holiday(current_date.isoformat())
+            
+            # 3. Se Fichado e Feriado, NÃO é dia útil
+            if is_fichado and is_holiday:
+                current_date += timedelta(days=1)
+                continue
+                
+            # 4. Se chegou aqui, é um dia útil (Sábado é dia útil, Feriado para não-fichado é dia útil)
+            return current_date
+
+    def calculate_bh_zero_exit(self, remaining_bh_minutes, next_business_day):
+        """Calcula o horário de saída no próximo dia útil para zerar o BH."""
+        
+        weekday = next_business_day.weekday()
+        
+        # Define o horário normal de saída
+        if weekday == 5: # Sábado (jornada de 4h)
+            # Assumindo 07:30 - 11:30
+            normal_exit_time = datetime.combine(next_business_day, time(11, 30))
+        else: # Seg-Sex (jornada de 8h)
+            # Assumindo 07:30-11:30 (4h) e 13:00-17:00 (4h) -> Saída 17:00
+            normal_exit_time = datetime.combine(next_business_day, time(17, 0))
+            
+        # Calcula o horário de saída ajustado
+        # Se BH > 0 (crédito), sai mais cedo (subtrai)
+        # Se BH < 0 (débito), sai mais tarde (soma)
+        target_exit_time = normal_exit_time - timedelta(minutes=remaining_bh_minutes)
+        
+        return target_exit_time.strftime('%H:%M')
+    # --- FIM DAS NOVAS FUNÇÕES ---
 
     def on_recalculate_and_refresh(self):
         """
