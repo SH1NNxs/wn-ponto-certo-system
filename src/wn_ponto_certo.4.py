@@ -225,9 +225,9 @@ class DatabaseManager:
         except Exception as e:
             print(f"Erro feriados recorrentes: {e}")
 
-    def add_holiday(self, data_str, descricao, tipo):
+    def add_holiday(self, date_str, descricao, tipo):
         try:
-            self.conn.execute("INSERT OR REPLACE INTO feriados (data, descricao, tipo) VALUES (?, ?, ?)", (data_str, descricao, tipo))
+            self.conn.execute("INSERT OR REPLACE INTO feriados (data, descricao, tipo) VALUES (?, ?, ?)", (date_str, descricao, tipo))
             self.conn.commit()
             return True
         except Exception as e:
@@ -337,10 +337,10 @@ class DatabaseManager:
             return False
 
 
-    def get_total_punishment_minutes_for_day(self, matricula, data_str):
+    def get_total_punishment_minutes_for_day(self, matricula, date_str):
         c = self.conn.cursor()
         query = "SELECT SUM(minutos_descontados) as total FROM punicoes WHERE matricula = ? AND data_punicao = ?"
-        c.execute(query, (matricula, data_str))
+        c.execute(query, (matricula, date_str))
         result = c.fetchone()
         return result['total'] if result and result['total'] is not None else 0
 
@@ -387,10 +387,10 @@ class DatabaseManager:
         c.execute(query, (matricula, start_date_str, end_date_str, SYSTEM_START_DATE))
         return [dict(row) for row in c.fetchall()]
 
-    def get_abono_minutes_for_day(self, matricula, data_str):
+    def get_abono_minutes_for_day(self, matricula, date_str):
         c = self.conn.cursor()
         query = "SELECT minutos_abonados FROM abonos WHERE matricula = ? AND data = ?"
-        c.execute(query, (matricula, data_str))
+        c.execute(query, (matricula, date_str))
         result = c.fetchone()
         return result['minutos_abonados'] if result and result['minutos_abonados'] is not None else 0
 
@@ -425,13 +425,13 @@ class DatabaseManager:
         # 2. Iterar dias para Faltas e Atrasos
         current_date_iter = start_date_obj
         while current_date_iter <= end_date_obj:
-            data_str = current_date_iter.isoformat()
+            date_str = current_date_iter.isoformat()
             
             # Pega a expectativa de trabalho
-            expected_minutes = self.get_expected_daily_minutes(data_str, is_fichado, matricula) # Passa a matrícula
+            expected_minutes = self.get_expected_daily_minutes(date_str, is_fichado)
 
             # Pega o trabalho realizado
-            c.execute("SELECT periodos, minutos_totais FROM horas_trabalhadas WHERE matricula=? AND data=?", (matricula, data_str))
+            c.execute("SELECT periodos, minutos_totais FROM horas_trabalhadas WHERE matricula=? AND data=?", (matricula, date_str))
             row = c.fetchone()
             
             worked_minutes = parse_hhmm_to_minutes(row['minutos_totais']) if row and row['minutos_totais'] else 0
@@ -486,9 +486,9 @@ class DatabaseManager:
             return False
 
     def get_expected_daily_minutes(self, date_str, is_fichado, matricula):
-        # --- LINHA CORRIGIDA ---
-        print(f"DEBUG: Dentro de get_expected_daily_minutes, recebido data_str = {date_str}")
-        # --- FIM DA CORREÇÃO ---
+        # --- ADICIONE ESTA LINHA ---
+        print(f"DEBUG: Dentro de get_expected_daily_minutes, recebido date_str = {date_str}")
+    # --- FIM DA ADIÇÃO ---
         """Retorna a carga horária esperada (débito) para um dia."""
         try:
             date_dt = datetime.strptime(date_str, "%Y-%m-%d").date()
@@ -606,9 +606,9 @@ class DatabaseManager:
         c.execute(query, (matricula, start_date_str, end_date_str, SYSTEM_START_DATE))
         return [dict(row) for row in c.fetchall()]
 
-    def _get_daily_summary_for_display(self, matricula, data_str):
+    def _get_daily_summary_for_display(self, matricula, date_str):
         c = self.conn.cursor()
-        c.execute("SELECT minutos_totais, periodos FROM horas_trabalhadas WHERE matricula=? AND data=?", (matricula, data_str))
+        c.execute("SELECT minutos_totais, periodos FROM horas_trabalhadas WHERE matricula=? AND data=?", (matricula, date_str))
         row = c.fetchone()
         if not row: return "00:00:00", "00:00:00"
         total_worked = row['minutos_totais']
@@ -619,7 +619,7 @@ class DatabaseManager:
                 # O valor que queremos mostrar como "Total Desconto" é a penalidade calculada
                 total_delay_penalty_minutes += parse_hhmm_to_minutes(p.get('deducao_minutos', '00:00:00'))
         except Exception as e:
-             print(f"Erro ao calcular dedução display para {matricula} em {data_str}: {e}")
+             print(f"Erro ao calcular dedução display para {matricula} em {date_str}: {e}")
              pass
         # Retorna o total líquido trabalhado e o total de penalidade
         return total_worked, format_minutes_to_hms(total_delay_penalty_minutes)
@@ -680,12 +680,12 @@ class DatabaseManager:
             sim_end_dt = max(end_dt, yesterday) # Simula até o fim do período ou ontem
 
             while current_sim_iter <= sim_end_dt:
-                data_str = current_sim_iter.isoformat() # Variável usada dentro do loop
+                date_str = current_sim_iter.isoformat() # Variável usada dentro do loop
                 bh_anterior_simulado = saldo_bh_simulado
                 extras_anterior_simulado = saldo_extras_simulado
 
                 if current_sim_iter == SYSTEM_CURRENT_DATE:
-                    historico_simulado[data_str] = {
+                    historico_simulado[date_str] = {
                         'bh_anterior': bh_anterior_simulado,
                         'bh_saldo': saldo_bh_simulado, # Saldo final de ontem
                         'extras_anterior': extras_anterior_simulado,
@@ -694,11 +694,11 @@ class DatabaseManager:
                     current_sim_iter += timedelta(days=1)
                     continue # Pula o resto do cálculo
 
-                print(f"DEBUG: Antes de chamar get_expected_daily_minutes para {matricula} em {data_str}")
+                print(f"DEBUG: Antes de chamar get_expected_daily_minutes para {matricula} em {date_str}")
 
-                expected_minutes = self.get_expected_daily_minutes(data_str, is_fichado, matricula)
+                expected_minutes = self.get_expected_daily_minutes(date_str, is_fichado, matricula)
 
-                minutos_trabalhados_dia = work_map.get(data_str, {}).get('minutos', 0)
+                minutos_trabalhados_dia = work_map.get(date_str, {}).get('minutos', 0)
                 excedente_dia = minutos_trabalhados_dia - expected_minutes
                 saldo_bh_simulado += excedente_dia
 
@@ -709,14 +709,14 @@ class DatabaseManager:
                     saldo_bh_simulado += MINUTOS_UNIDADE_EXTRA
                     saldo_extras_simulado -= 1
 
-                punicao_do_dia = self.get_total_punishment_minutes_for_day(matricula, data_str)
+                punicao_do_dia = self.get_total_punishment_minutes_for_day(matricula, date_str)
                 if punicao_do_dia > 0:
                     saldo_bh_simulado -= punicao_do_dia
                     while saldo_bh_simulado < 0 and saldo_extras_simulado > 0:
                         saldo_bh_simulado += MINUTOS_UNIDADE_EXTRA
                         saldo_extras_simulado -= 1
 
-                historico_simulado[data_str] = {
+                historico_simulado[date_str] = {
                     'bh_anterior': bh_anterior_simulado,
                     'bh_saldo': saldo_bh_simulado,
                     'extras_anterior': extras_anterior_simulado,
@@ -726,10 +726,10 @@ class DatabaseManager:
 
             current_date_iter = start_dt
             while current_date_iter <= end_dt:
-                data_str = current_date_iter.isoformat() # Variável usada dentro do loop
+                date_str = current_date_iter.isoformat() # Variável usada dentro do loop
 
-                dados_do_dia = work_map.get(data_str)
-                simulacao_do_dia = historico_simulado.get(data_str)
+                dados_do_dia = work_map.get(date_str)
+                simulacao_do_dia = historico_simulado.get(date_str)
 
                 if not simulacao_do_dia:
                     if current_date_iter < start_sim_dt:
@@ -740,7 +740,7 @@ class DatabaseManager:
                             'extras_saldo': info_final_real.get('extras_disponiveis_inicial', 0)
                         }
                     else:
-                        last_sim_date = max((d for d in historico_simulado if d < data_str), default=None)
+                        last_sim_date = max((d for d in historico_simulado if d < date_str), default=None)
                         if last_sim_date:
                             simulacao_do_dia = {
                                 'bh_anterior': historico_simulado[last_sim_date]['bh_saldo'],
@@ -760,7 +760,7 @@ class DatabaseManager:
                 is_incomplete_day = False
 
                 if dados_do_dia:
-                    carga_horaria_dia_str_temp, total_desconto_penalidade_str_temp = self._get_daily_summary_for_display(matricula, data_str)
+                    carga_horaria_dia_str_temp, total_desconto_penalidade_str_temp = self._get_daily_summary_for_display(matricula, date_str)
                     carga_horaria_dia_str = carga_horaria_dia_str_temp
                     total_desconto_penalidade_str = total_desconto_penalidade_str_temp
 
@@ -776,11 +776,11 @@ class DatabaseManager:
                              if entrada_str and not saida_str:
                                  is_incomplete_day = True
                     except Exception as e:
-                        print(f"Erro ao processar períodos para {matricula} em {data_str}: {e}")
+                        print(f"Erro ao processar períodos para {matricula} em {date_str}: {e}")
                         pass
 
                 ponto_dict = {
-                    'Matricula': matricula, 'Nome': info_final_real['nome'], 'Data': data_str,
+                    'Matricula': matricula, 'Nome': info_final_real['nome'], 'Data': date_str,
                     'E1': '', 'S1': '', 'E2': '', 'S2': '',
                     'Carga_Horaria': carga_horaria_dia_str, 
                     'Total_Desconto': total_desconto_penalidade_str,
@@ -908,11 +908,11 @@ class DatabaseManager:
 
         current_date_iter = start_dt
         while current_date_iter <= end_dt:
-            data_str = current_date_iter.isoformat()
+            date_str = current_date_iter.isoformat()
 
-            expected_minutes = self.get_expected_daily_minutes(data_str, is_fichado, matricula) # Chama a função corrigida
+            expected_minutes = self.get_expected_daily_minutes(date_str, is_fichado, matricula) # Chama a função corrigida
 
-            minutos_trabalhados_dia = work_map.get(data_str, 0)
+            minutos_trabalhados_dia = work_map.get(date_str, 0)
             excedente_dia = minutos_trabalhados_dia - expected_minutes
             saldo_bh_minutos += excedente_dia
 
@@ -1018,14 +1018,14 @@ class DatabaseManager:
         
         if sim_start_dt <= sim_end_dt:
             while current_sim_iter <= sim_end_dt:
-                data_str = current_sim_iter.isoformat()
+                date_str = current_sim_iter.isoformat()
                 
                 if current_sim_iter == SYSTEM_CURRENT_DATE:
                     current_sim_iter += timedelta(days=1)
                     continue
                 
-                expected_minutes = self.get_expected_daily_minutes(data_str, is_fichado, matricula)
-                minutos_trabalhados_dia = work_map.get(data_str, {}).get('minutos', 0)
+                expected_minutes = self.get_expected_daily_minutes(date_str, is_fichado, matricula)
+                minutos_trabalhados_dia = work_map.get(date_str, {}).get('minutos', 0)
                 excedente_dia = minutos_trabalhados_dia - expected_minutes
                 saldo_bh_simulado += excedente_dia
 
@@ -1036,7 +1036,7 @@ class DatabaseManager:
                     saldo_bh_simulado += MINUTOS_UNIDADE_EXTRA
                     saldo_extras_simulado -= 1
 
-                punicao_do_dia = punicoes_map.get(data_str, 0)
+                punicao_do_dia = punicoes_map.get(date_str, 0)
                 if punicao_do_dia > 0:
                     saldo_bh_simulado -= punicao_do_dia
                     while saldo_bh_simulado < 0 and saldo_extras_simulado > 0:
@@ -1051,29 +1051,29 @@ class DatabaseManager:
         # 3. Simula DENTRO do período do relatório (para pegar estatísticas e saldos finais)
         current_date_iter = start_date
         while current_date_iter <= end_date:
-            data_str = current_date_iter.isoformat()
+            date_str = current_date_iter.isoformat()
             
             if current_date_iter == SYSTEM_CURRENT_DATE:
                  current_date_iter += timedelta(days=1)
                  continue
 
             # Pega expectativa (já com abono subtraído)
-            expected_minutes = self.get_expected_daily_minutes(data_str, is_fichado, matricula)
+            expected_minutes = self.get_expected_daily_minutes(date_str, is_fichado, matricula)
             
             # Pega expectativa (sem abono) para contagem de faltas
             date_dt = current_date_iter
             expected_minutes_raw = 0
             if date_dt.weekday() != 6: # Não é Domingo
-                is_holiday_today = self.is_holiday(data_str)
+                is_holiday_today = self.is_holiday(date_str)
                 if not (is_holiday_today and is_fichado): # Não é feriado para fichado
                     if date_dt.weekday() < 5: expected_minutes_raw = MINUTOS_JORNADA_SEG_SEX
                     elif date_dt.weekday() == 5: expected_minutes_raw = MINUTOS_JORNADA_SABADO
             
-            dados_dia = work_map.get(data_str)
+            dados_dia = work_map.get(date_str)
             minutos_trabalhados_dia = dados_dia.get('minutos', 0) if dados_dia else 0
             
             # Pega minutos abonados para estatística
-            abono_min_dia = abonos_map.get(data_str, 0)
+            abono_min_dia = abonos_map.get(date_str, 0)
             stats['minutos_abonados_total'] += abono_min_dia
 
             # Contabiliza Faltas
@@ -1111,7 +1111,7 @@ class DatabaseManager:
                 saldo_extras_simulado -= 1
                 stats['extras_geradas_periodo'] -= 1
 
-            punicao_do_dia = punicoes_map.get(data_str, 0)
+            punicao_do_dia = punicoes_map.get(date_str, 0)
             if punicao_do_dia > 0:
                 stats['punicoes_count'] += 1
                 stats['punicoes_min'] += punicao_do_dia
@@ -1668,9 +1668,9 @@ class App:
              selection = cmb_func.get();
              if not selection: messagebox.showerror("Erro", "Funcionário não selecionado.", parent=win); return
              matricula = selection.split(" - ")[0]; nome_func = " ".join(selection.split(" - ")[1:])
-             data_str = cal_punicao.get_date(); tempo_str = entry_tempo.get().strip(); motivo = entry_motivo.get().strip()
+             date_str = cal_punicao.get_date(); tempo_str = entry_tempo.get().strip(); motivo = entry_motivo.get().strip()
 
-             if data_str < SYSTEM_START_DATE:
+             if date_str < SYSTEM_START_DATE:
                  messagebox.showerror("Erro", f"Não é possível registrar punições antes de {SYSTEM_START_DATE}.", parent=win)
                  return
 
@@ -1683,11 +1683,11 @@ class App:
              if minutos_descontados < 0:
                  minutos_descontados = abs(minutos_descontados)
 
-             confirm_msg = (f"Confirmar {format_minutes_to_hms(minutos_descontados)} para {nome_func}\nData: {datetime.strptime(data_str, '%Y-%m-%d').strftime('%d/%m/%Y')}?\nMotivo: {motivo}\n\nATENÇÃO: A punição será registrada e o saldo recalculado.")
+             confirm_msg = (f"Confirmar {format_minutes_to_hms(minutos_descontados)} para {nome_func}\nData: {datetime.strptime(date_str, '%Y-%m-%d').strftime('%d/%m/%Y')}?\nMotivo: {motivo}\n\nATENÇÃO: A punição será registrada e o saldo recalculado.")
              if messagebox.askyesno("Confirmar Punição", confirm_msg, parent=win):
-                 if self.db.add_punicao(matricula, data_str, minutos_descontados, motivo):
+                 if self.db.add_punicao(matricula, date_str, minutos_descontados, motivo):
                      messagebox.showinfo("Sucesso", "Punição registrada! O saldo será recalculado.", parent=win)
-                     self.append_log(f"PUNIÇÃO REGISTRADA: {matricula} - {data_str} - {format_minutes_to_hms(minutos_descontados)} - {motivo}")
+                     self.append_log(f"PUNIÇÃO REGISTRADA: {matricula} - {date_str} - {format_minutes_to_hms(minutos_descontados)} - {motivo}")
                      cmb_func.set(''); entry_tempo.delete(0, 'end'); entry_motivo.delete(0, 'end')
                      try:
                          self.db.recalculate_full_balance_for_employee(matricula)
@@ -2922,7 +2922,7 @@ class App:
             
             try:
                 data_dt = cal_abono.selection_get()
-                data_str = data_dt.isoformat()
+                date_str = data_dt.isoformat()
             except:
                 messagebox.showerror("Erro", "Data inválida.", parent=win)
                 return
@@ -2940,7 +2940,7 @@ class App:
                 return
             # <-- FIM DA ADIÇÃO -->
             
-            if data_str < SYSTEM_START_DATE:
+            if date_str < SYSTEM_START_DATE:
                  messagebox.showerror("Erro", f"Não é possível abonar dias antes de {SYSTEM_START_DATE}.", parent=win)
                  return
 
@@ -2948,8 +2948,8 @@ class App:
             if not messagebox.askyesno("Confirmar Abono", confirm_msg, parent=win):
                 return
             
-            if self.db.add_abono(matricula, data_str, motivo, minutos_abonados): # <-- PARÂMETRO ADICIONADO
-                self.append_log(f"ABONO REGISTRADO: {matricula} - {data_str} - {format_minutes_to_hms(minutos_abonados)} - {motivo}. Recalculando...")
+            if self.db.add_abono(matricula, date_str, motivo, minutos_abonados): # <-- PARÂMETRO ADICIONADO
+                self.append_log(f"ABONO REGISTRADO: {matricula} - {date_str} - {format_minutes_to_hms(minutos_abonados)} - {motivo}. Recalculando...")
                 try:
                     self.db.recalculate_full_balance_for_employee(matricula)
                     self.append_log(f"Recálculo de {matricula} concluído.")

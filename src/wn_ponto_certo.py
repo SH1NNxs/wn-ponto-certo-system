@@ -2,12 +2,13 @@ import os
 import tkinter as tk
 from tkinter import filedialog, scrolledtext, messagebox, ttk
 from collections import defaultdict
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, time
 import sqlite3
 import json
 from pathlib import Path
 from tkcalendar import Calendar
 import re
+import sys
 
 # Tenta importar bibliotecas necessárias
 try:
@@ -30,15 +31,31 @@ except ImportError:
 # -------------------------
 # BANCO DE DADOS (SQLite)
 # -------------------------
-DEFAULT_DB = Path(__file__).parent.joinpath("ponto.db")
-LOGO_PATH = Path(__file__).parent.joinpath("wn_logo.png")
+
+if getattr(sys, 'frozen', False):
+    # Estamos rodando como um .exe (compilado)
+    base_path_persistente = Path(sys.executable).parent
+    base_path_asset = Path(__file__).parent
+else:
+    # Estamos rodando como um script .py (desenvolvimento)
+    base_path_persistente = Path(__file__).parent
+    base_path_asset = Path(__file__).parent
+
+# O Banco de Dados é PERSISTENTE
+DEFAULT_DB = base_path_persistente.joinpath("ponto.db")
+
+# O Logo é um ASSET (incluído com --add-data)
+LOGO_PATH = base_path_asset.joinpath("wn_logo.png")
+
+# O ÍCONE é um ASSET (também precisa ser incluído)
+LOGO_ICON_PATH = base_path_asset.joinpath("wn_logo.ico")
 
 # -------------------------
 # CONSTANTES E FUNÇÕES DE APOIO
 # -------------------------
 
 # Define a data de início de operação do sistema. Cálculos ignoram datas anteriores.
-SYSTEM_START_DATE = "2025-10-01"
+SYSTEM_START_DATE = "2025-10-18" # <-- Data de início FIXA
 # Define a "data atual" para ser usada nos cálculos de recálculo diário.
 SYSTEM_CURRENT_DATE = datetime.now().date()
 
@@ -152,8 +169,6 @@ def parse_hhmm_to_minutes(time_str):
         return 0
 
 # --- Classe DatabaseManager ---
-# [O restante da classe DatabaseManager permanece idêntico ao código anterior]
-# ... (código da classe DatabaseManager omitido para brevidade, mas inclui a correção do NameError) ...
 class DatabaseManager:
     def __init__(self, db_path=None):
         self.db_path = str(db_path if db_path else DEFAULT_DB)
@@ -605,6 +620,8 @@ class DatabaseManager:
                             }
 
                 carga_horaria_dia_str, total_desconto_penalidade_str, horarios = "00:00:00", "00:00:00", []
+                is_incomplete_day = False
+
                 if dados_do_dia:
                     # _get_daily_summary_for_display retorna (tempo_liquido, penalidade_total)
                     carga_horaria_dia_str_temp, total_desconto_penalidade_str_temp = self._get_daily_summary_for_display(matricula, data_str)
@@ -620,6 +637,8 @@ class DatabaseManager:
                                  horarios.append(datetime.strptime(entrada_str, '%Y-%m-%d %H:%M:%S').strftime('%H:%M'))
                              if saida_str:
                                  horarios.append(datetime.strptime(saida_str, '%Y-%m-%d %H:%M:%S').strftime('%H:%M'))
+                             if entrada_str and not saida_str:
+                                 is_incomplete_day = True
                     except Exception as e:
                         print(f"Erro ao processar períodos para {matricula} em {data_str}: {e}")
                         pass
@@ -631,7 +650,8 @@ class DatabaseManager:
                     'Total_Desconto': total_desconto_penalidade_str, # Penalidade calculada
                     'BH_Anterior': format_minutes_to_hms(simulacao_do_dia['bh_anterior']),
                     'BH_Saldo': format_minutes_to_hms(simulacao_do_dia['bh_saldo']),
-                    'Extras_Disp': str(int(simulacao_do_dia['extras_saldo']))
+                    'Extras_Disp': str(int(simulacao_do_dia['extras_saldo'])),
+                    'is_incomplete': is_incomplete_day
                 }
 
                 if len(horarios) >= 1: ponto_dict['E1'] = horarios[0]
@@ -797,16 +817,15 @@ def import_glog_txt(filepath, db_manager, logger=print):
                 parts = re.split(r'\s+', line.strip())
                 if len(parts) < 8: continue
                 try:
-                    # Tenta extrair matrícula, nome, data e hora
                     matricula = str(parts[2]).zfill(8)
                     nome = str(parts[3]).strip()
-                    # Verifica se data e hora estão presentes
                     if len(parts) >= 8 and parts[6] and parts[7]:
                         dt_str = f"{parts[6]} {parts[7]}"
                         dt = try_parse_datetime(dt_str)
                         if dt:
+                            # Filtra pela constante global
                             if dt.date() < datetime.strptime(SYSTEM_START_DATE, "%Y-%m-%d").date():
-                                continue # Ignora datas anteriores ao início
+                                 continue # Ignora datas anteriores ao início
                             unique_employees.add((matricula, nome))
                             employees_points_raw[matricula][dt.date().isoformat()].append({"datetime": dt})
                         else:
@@ -836,73 +855,75 @@ def import_glog_txt(filepath, db_manager, logger=print):
         sector = func_info.get('setor', 'N/D') if func_info else 'N/D'
 
         for data, pontos_brutos in sorted(dias.items()):
+            # Checagem extra por segurança
             if data < SYSTEM_START_DATE:
                 continue
 
             pontos_brutos.sort(key=lambda x: x["datetime"])
-            periodos_trabalhados, minutos_trabalhados_decimal_total = [], 0 # Renomeado para clareza
+            periodos_trabalhados, minutos_trabalhados_decimal_total = [], 0
             horarios_sequenciais = [p["datetime"] for p in pontos_brutos]
 
-            if len(horarios_sequenciais) % 2 != 0:
-                logger(f"AVISO: {matricula} {data}: Número ímpar de batidas ({len(horarios_sequenciais)}). Última batida ignorada.")
-                horarios_sequenciais.pop()
-
-            for i in range(0, len(horarios_sequenciais), 2):
-                entrada, saida = horarios_sequenciais[i], horarios_sequenciais[i+1]
-
-                if saida < entrada:
-                   logger(f"AVISO: {matricula} {data}: Saída ({saida}) anterior à entrada ({entrada}). Ignorando período.")
-                   continue
-
-                turno = "Manhã" if i == 0 else "Tarde"
+            i = 0
+            while i < len(horarios_sequenciais):
+                entrada = horarios_sequenciais[i]
+                saida = None
+                
+                if i + 1 < len(horarios_sequenciais):
+                    saida = horarios_sequenciais[i+1]
+                else:
+                    pass # Última batida ímpar
+                
+                turno = "Manhã" if i < 2 else "Tarde"
                 jornada_inicio = datetime.strptime(f"{data} {'07:30' if turno == 'Manhã' else '13:00'}", "%Y-%m-%d %H:%M")
-
                 minutes_late = max(0, (entrada - jornada_inicio).total_seconds() / 60)
-                delay_deduction_minutes = calculate_deduction(minutes_late, sector) # Usa a função corrigida
-
-                # --- NOVA LÓGICA DE CÁLCULO LÍQUIDO ---
-                inicio_efetivo = jornada_inicio + timedelta(minutes=delay_deduction_minutes)
-                # O início real para contagem é o maior entre a batida real e o início efetivo pós-penalidade
-                inicio_real_contagem = max(entrada, inicio_efetivo)
-
-                # Duração líquida: da saída até o início real da contagem
-                duration_minutes_liquido = 0
-                if saida > inicio_real_contagem:
-                    duration_minutes_liquido = (saida - inicio_real_contagem).total_seconds() / 60
-
-                # Duração bruta (para registro, se necessário)
-                duration_minutes_bruto = (saida - entrada).total_seconds() / 60
-                # --- FIM DA NOVA LÓGICA ---
-
-                minutos_trabalhados_decimal_total += duration_minutes_liquido # Acumula o líquido total
-                periodos_trabalhados.append({
-                    "entrada": str(entrada), "saida": str(saida),
-                    "minutos_brutos": format_minutes_to_hms(duration_minutes_bruto),
-                    "deducao_minutos": format_minutes_to_hms(delay_deduction_minutes), # Mantém o valor da penalidade
-                    "minutos_liquidos": format_minutes_to_hms(duration_minutes_liquido) # Salva o líquido calculado
-                })
+                delay_deduction_minutes = calculate_deduction(minutes_late, sector)
+                
+                if saida: # Par completo
+                    if saida < entrada:
+                       logger(f"AVISO: {matricula} {data}: Saída ({saida}) anterior à entrada ({entrada}). Ignorando período.")
+                       i += 2
+                       continue
+                    inicio_efetivo = jornada_inicio + timedelta(minutes=delay_deduction_minutes)
+                    inicio_real_contagem = max(entrada, inicio_efetivo)
+                    duration_minutes_liquido = 0
+                    if saida > inicio_real_contagem:
+                        duration_minutes_liquido = (saida - inicio_real_contagem).total_seconds() / 60
+                    duration_minutes_bruto = (saida - entrada).total_seconds() / 60
+                    minutos_trabalhados_decimal_total += duration_minutes_liquido
+                    periodos_trabalhados.append({
+                        "entrada": str(entrada), "saida": str(saida),
+                        "minutos_brutos": format_minutes_to_hms(duration_minutes_bruto),
+                        "deducao_minutos": format_minutes_to_hms(delay_deduction_minutes),
+                        "minutos_liquidos": format_minutes_to_hms(duration_minutes_liquido)
+                    })
+                    i += 2
+                else: # Batida ímpar
+                    logger(f"AVISO: {matricula} {data}: Batida ímpar detectada ({entrada}). Salva como incompleta.")
+                    periodos_trabalhados.append({
+                        "entrada": str(entrada), "saida": None,
+                        "minutos_brutos": "00:00:00",
+                        "deducao_minutos": format_minutes_to_hms(delay_deduction_minutes),
+                        "minutos_liquidos": "00:00:00"
+                    })
+                    i += 1
 
             if periodos_trabalhados:
                 db_manager.insert_horas_trabalhadas({
                     "matricula": matricula,
                     "data": data,
-                    "minutos_totais": format_minutes_to_hms(minutos_trabalhados_decimal_total), # Salva o total líquido
+                    "minutos_totais": format_minutes_to_hms(minutos_trabalhados_decimal_total),
                     "periodos": periodos_trabalhados
                 })
             elif len(horarios_sequenciais) > 0:
                 logger(f"AVISO: {matricula} {data}: Nenhuns períodos de trabalho válidos formados a partir das batidas.")
 
-
     return new_employees_list, processed_matriculas_in_file
-# --- FIM DO AJUSTE em import_glog_txt ---
 
 
 # --- Classe DateRangePicker ---
-# [A classe DateRangePicker permanece idêntica ao código anterior]
-# ... (código da classe DateRangePicker omitido para brevidade) ...
 class DateRangePicker:
     """Um widget de calendário reutilizável que seleciona um intervalo de datas."""
-    def __init__(self, parent, bg_color, style_colors):
+    def __init__(self, parent, bg_color, style_colors): # Removido system_start_date_str
         self.frame = tk.Frame(parent, bg=bg_color)
         self.selected_start_date = None
         self.selected_end_date = None
@@ -911,6 +932,7 @@ class DateRangePicker:
         self.style_colors = style_colors
 
         try:
+            # Usa constante global
             min_date = datetime.strptime(SYSTEM_START_DATE, "%Y-%m-%d").date()
         except:
             min_date = None
@@ -920,7 +942,7 @@ class DateRangePicker:
                             normalbackground=style_colors['LIGHT_BG'], weekendbackground="#172a45",
                             othermonthbackground=style_colors['BG_COLOR'], othermonthforeground="#6a7b9d",
                             selectbackground=style_colors['ACCENT_COLOR'],
-                            mindate=min_date)
+                            mindate=min_date) # mindate definido aqui
 
         self.cal.pack(side=tk.LEFT, padx=(0, 20))
         self.cal.bind("<<CalendarSelected>>", self._on_calendar_click)
@@ -942,6 +964,8 @@ class DateRangePicker:
 
     def pack(self, **kwargs):
         self.frame.pack(**kwargs)
+
+    # Removida a função update_mindate
 
     def _update_calendar_tags(self):
         self.cal.calevent_remove('all')
@@ -972,7 +996,8 @@ class DateRangePicker:
         if not clicked_date: return
 
         try:
-            min_date = datetime.strptime(SYSTEM_START_DATE, "%Y-%m-%d").date()
+            # Re-lê a data mínima do próprio widget
+            min_date = self.cal.cget('mindate')
             if clicked_date < min_date:
                 clicked_date = min_date
                 self.cal.selection_set(clicked_date)
@@ -995,20 +1020,26 @@ class DateRangePicker:
     def get_dates(self):
         return self.selected_start_date, self.selected_end_date
 
+
 # --- Classe App ---
-# [A classe App permanece idêntica ao código anterior, já com as correções de saldo e NameError]
-# ... (código da classe App e suas funções internas omitido para brevidade, mas inclui as correções anteriores) ...
 class App:
     def __init__(self, root):
         self.db = DatabaseManager()
+        # Removido self.SYSTEM_START_DATE
         self.root = root
         self.root.state('zoomed')
         self.root.title("WN Ponto Certo")
+        try:
+            self.root.iconbitmap(LOGO_ICON_PATH)
+        except Exception as e:
+            print(f"Aviso: Não foi possível carregar o ícone: {e}")
         self.root.configure(bg="#0a192f")
         self.root.minsize(1200, 700)
 
         try:
-            self.selected_start_date = max(date.today().replace(day=1), datetime.strptime(SYSTEM_START_DATE, "%Y-%m-%d").date())
+            # Usa constante global
+            min_date_obj = datetime.strptime(SYSTEM_START_DATE, "%Y-%m-%d").date()
+            self.selected_start_date = max(date.today().replace(day=1), min_date_obj)
         except:
             self.selected_start_date = date.today().replace(day=1)
 
@@ -1017,15 +1048,16 @@ class App:
         self.selecting_start = True
         self.unsaved_edits = {}
         self.editing_widgets = {}
+        # Removido self.dynamic_calendar_widgets
+        
         self.setup_styles()
         self.setup_ui()
 
         if hasattr(self, 'main_calendar'):
-            # Define as datas iniciais e força a atualização do panorama
             self.main_calendar.selection_set(self.selected_start_date)
             self.on_calendar_click()
             self.main_calendar.selection_set(self.selected_end_date)
-            self.on_calendar_click() # Chama load_point_viewer aqui
+            self.on_calendar_click()
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_app_close)
 
@@ -1053,6 +1085,9 @@ class App:
         style.configure('TEntry', fieldbackground=self.LIGHT_BG, foreground=self.FG_COLOR, insertcolor=self.FG_COLOR)
         style.map('TEntry', fieldbackground=[('disabled', '#0a192f')], foreground=[('disabled', '#6a7b9d')])
         style.configure('TCombobox', fieldbackground=self.LIGHT_BG, background=self.LIGHT_BG, arrowcolor=self.FG_COLOR, foreground=self.FG_COLOR, selectbackground=self.LIGHT_BG, selectforeground=self.FG_COLOR)
+        # --- FIX VISUALIZAÇÃO COMBOBOX ---
+        style.map('TCombobox', foreground=[('readonly', 'Black')]) # Força texto branco para readonly
+        # --- FIM FIX ---
         self.root.option_add('*TCombobox*Listbox.background', self.LIGHT_BG)
         self.root.option_add('*TCombobox*Listbox.foreground', self.FG_COLOR)
         self.root.option_add('*TCombobox*Listbox.selectBackground', self.ACCENT_COLOR)
@@ -1132,6 +1167,9 @@ class App:
             self.append_log(f"Arquivo selecionado: {filepath}")
             self.append_log("Iniciando importação...")
             new_employees, processed_matriculas = import_glog_txt(filepath, self.db, logger=self.append_log)
+            
+            # Removido bloco de atualização dinâmica de mindate
+
             if new_employees:
                 self.append_log(f"{len(new_employees)} novos funcionários. Complete o cadastro.")
                 for matricula, nome in new_employees:
@@ -1293,6 +1331,8 @@ class App:
             min_date = None
 
         tk.Label(form_frame, text="2. Data:", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5)); cal_punicao = Calendar(form_frame, selectmode="day", date_pattern="yyyy-mm-dd", locale='pt_BR', background="#008080", foreground="white", headersbackground="#008080", mindate=min_date); cal_punicao.pack(anchor="w", pady=(0, 15))
+        # Removida adição à lista dinâmica
+        
         tk.Label(form_frame, text="3. Tempo (HH:MM):", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5)); entry_tempo = ttk.Entry(form_frame, width=15); entry_tempo.pack(anchor="w", pady=(0, 15))
         tk.Label(form_frame, text="4. Motivo:", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5)); entry_motivo = ttk.Entry(form_frame, width=50); entry_motivo.pack(anchor="w", fill="x", pady=(0, 20))
 
@@ -1356,6 +1396,7 @@ class App:
                                background="#008080", foreground="white", headersbackground="#008080",
                                mindate=min_date)
         cal_feriado.pack(anchor="w", pady=(0, 15), padx=10)
+        # Removida adição à lista dinâmica
 
         tk.Label(form_frame, text="2. Descrição:", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5), padx=10)
         entry_descricao = ttk.Entry(form_frame, width=30)
@@ -1613,6 +1654,8 @@ class App:
             "fichado_info": {},
             "nao_fichado_info": {}
         }
+        
+        # Removida lista dynamic_drp_widgets
 
         def clear_details_frame():
             for widget in details_frame.winfo_children():
@@ -1620,6 +1663,8 @@ class App:
             widgets.clear()
             data_vars["fichado_info"].clear()
             data_vars["nao_fichado_info"].clear()
+            # Removida limpeza da lista dinâmica
+
 
         def is_sunday_or_holiday(date_obj):
             if date_obj.weekday() == 6:
@@ -1703,6 +1748,32 @@ class App:
                 story.append(Paragraph("<b>Saldos Remanescentes (Após Pagamento)</b>", styles['h2']))
                 story.append(Paragraph(f"<b>Extras:</b> {int(func_info.get('extras_disponiveis', 0))}", styles['Normal']))
                 story.append(Paragraph(f"<b>Banco de Horas:</b> {format_minutes_to_hms(func_info.get('banco_horas', 0))}", styles['Normal']))
+
+                # --- INÍCIO DA MODIFICAÇÃO (FICHADO) ---
+                try:
+                    remaining_bh = func_info.get('banco_horas', 0)
+                    
+                    # --- AJUSTE SOLICITADO ---
+                    # Determina a data base para encontrar o próximo dia útil
+                    start_search_date = date.today() # Padrão
+                    if payment_details.get('pay_partial_salary') and payment_details.get('end_date'):
+                        start_search_date = payment_details['end_date']
+                    # --- FIM AJUSTE SOLICITADO ---
+
+                    # Esta função é para 'fichado', então is_fichado=True
+                    next_business_day = self.find_next_business_day(start_search_date, is_fichado=True)
+                    target_exit_time = self.calculate_bh_zero_exit(remaining_bh, next_business_day)
+                    
+                    story.append(Spacer(1, 0.5*cm))
+                    story.append(Paragraph("<b>Informação para Zerar Banco de Horas:</b>", styles['h2']))
+                    info_text = (f"Para zerar o saldo de BH, o horário de saída no próximo dia útil, desde que seja respeitado o horário de entrada, "
+                                 f"(<b>{next_business_day.strftime('%d/%m/%Y')}</b>) deverá ser às <b>{target_exit_time}</b>.")
+                    story.append(Paragraph(info_text, styles['Normal']))
+                
+                except Exception as e:
+                    print(f"Erro ao calcular saída para zerar BH (fichado): {e}")
+                    story.append(Paragraph("<i>Não foi possível calcular o horário para zerar o BH.</i>", styles['Italic']))
+                # --- FIM DA MODIFICAÇÃO ---
 
                 story.append(Spacer(1, 2.5*cm))
                 story.append(Paragraph("________________________________________", styles['Normal']))
@@ -1870,6 +1941,30 @@ class App:
                 story.append(Paragraph(f"<b>Banco de Horas:</b> {format_minutes_to_hms(func_info.get('banco_horas', 0))}", styles['Normal']))
                 story.append(Paragraph(f"<b>Extras:</b> {int(func_info.get('extras_disponiveis', 0))}", styles['Normal']))
 
+                # --- INÍCIO DA MODIFICAÇÃO (NÃO FICHADO) ---
+                try:
+                    remaining_bh = func_info.get('banco_horas', 0)
+                    
+                    # --- AJUSTE SOLICITADO ---
+                    # Para não fichado, a data base é sempre o fim do período de diárias
+                    start_search_date = payment_details['end_date']
+                    # --- FIM AJUSTE SOLICITADO ---
+
+                    # Esta função é para 'não fichado', então is_fichado=False
+                    next_business_day = self.find_next_business_day(start_search_date, is_fichado=False)
+                    target_exit_time = self.calculate_bh_zero_exit(remaining_bh, next_business_day)
+                    
+                    story.append(Spacer(1, 0.5*cm))
+                    story.append(Paragraph("<b>Informação para Zerar Banco de Horas:</b>", styles['h2']))
+                    info_text = (f"Para zerar o saldo de BH, o horário de saída no próximo dia útil "
+                                 f"(<b>{next_business_day.strftime('%d/%m/%Y')}</b>) deverá ser às <b>{target_exit_time}</b>.")
+                    story.append(Paragraph(info_text, styles['Normal']))
+                
+                except Exception as e:
+                    print(f"Erro ao calcular saída para zerar BH (não fichado): {e}")
+                    story.append(Paragraph("<i>Não foi possível calcular o horário para zerar o BH.</i>", styles['Italic']))
+                # --- FIM DA MODIFICAÇÃO ---
+
                 story.append(Spacer(1, 2.5*cm))
                 story.append(Paragraph("________________________________________", styles['Normal']))
                 story.append(Paragraph(nome, styles['Normal']))
@@ -2002,8 +2097,11 @@ class App:
 
             frame_parcial_widgets = tk.Frame(frame_parcial_group, bg=self.BG_COLOR)
 
+            # Usa construtor padrão do DateRangePicker
             date_picker = DateRangePicker(frame_parcial_widgets, self.BG_COLOR, self.style_colors_dict)
             date_picker.pack(pady=10)
+            # Removida adição à lista dinâmica
+
 
             tk.Label(frame_parcial_widgets, text="Valor Salário Mensal (R$):", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(anchor='w', padx=5, pady=(10,0))
             entry_salario_mensal = ttk.Entry(frame_parcial_widgets, width=20)
@@ -2051,8 +2149,11 @@ class App:
             frame_diarias = ttk.LabelFrame(details_frame, text=" Pagamento de Diárias (Dias Trabalhados) ", style='TLabelframe')
             frame_diarias.pack(fill='x', pady=10)
 
+            # Usa construtor padrão do DateRangePicker
             date_picker = DateRangePicker(frame_diarias, self.BG_COLOR, self.style_colors_dict)
             date_picker.pack(pady=10)
+            # Removida adição à lista dinâmica
+
 
             tk.Label(frame_diarias, text="Valor da Diária (R$):", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(anchor='w', padx=5, pady=(10,0))
             entry_valor_diaria = ttk.Entry(frame_diarias, width=20)
@@ -2103,6 +2204,9 @@ class App:
 
         period_frame = tk.Frame(form_frame, bg="#0a1f2f"); period_frame.pack(anchor="w"); tk.Label(period_frame, text="De:", bg="#0a192f", fg="#ccd6f6").pack(side=tk.LEFT, padx=(0,5)); cal_start = Calendar(period_frame, selectmode="day", date_pattern="yyyy-mm-dd", locale='pt_BR', background="#008080", foreground="white", headersbackground="#008080", mindate=min_date); cal_start.pack(side=tk.LEFT, padx=(0, 10))
         tk.Label(period_frame, text="Até:", bg="#0a192f", fg="#ccd6f6").pack(side=tk.LEFT, padx=(0,5)); cal_end = Calendar(period_frame, selectmode="day", date_pattern="yyyy-mm-dd", locale='pt_BR', background="#008080", foreground="white", headersbackground="#008080", mindate=min_date); cal_end.pack(side=tk.LEFT); btn_export = ttk.Button(form_frame, text="Gerar PDF", style='TButton'); btn_export.pack(pady=20)
+        
+        # Removida adição à lista dinâmica
+
 
         if min_date:
             cal_start.selection_set(max(date.today().replace(day=1), min_date))
@@ -2141,6 +2245,50 @@ class App:
                 story.append(t); doc.build(story); messagebox.showinfo("Sucesso", f"Relatório salvo:\n{filepath}", parent=win); win.destroy()
             except Exception as e: messagebox.showerror("Erro PDF", f"Erro: {e}", parent=win)
         btn_export.config(command=generate_pdf)
+
+    # --- INÍCIO DAS NOVAS FUNÇÕES ---
+    def find_next_business_day(self, start_date, is_fichado):
+        """Encontra o próximo dia útil (não-domingo, não-feriado se fichado)."""
+        current_date = start_date + timedelta(days=1)
+        while True:
+            weekday = current_date.weekday()
+            
+            # 1. Domingo NUNCA é dia útil
+            if weekday == 6:
+                current_date += timedelta(days=1)
+                continue
+
+            # 2. Verifica Feriado
+            is_holiday = self.db.is_holiday(current_date.isoformat())
+            
+            # 3. Se Fichado e Feriado, NÃO é dia útil
+            if is_fichado and is_holiday:
+                current_date += timedelta(days=1)
+                continue
+                
+            # 4. Se chegou aqui, é um dia útil (Sábado é dia útil, Feriado para não-fichado é dia útil)
+            return current_date
+
+    def calculate_bh_zero_exit(self, remaining_bh_minutes, next_business_day):
+        """Calcula o horário de saída no próximo dia útil para zerar o BH."""
+        
+        weekday = next_business_day.weekday()
+        
+        # Define o horário normal de saída
+        if weekday == 5: # Sábado (jornada de 4h)
+            # Assumindo 07:30 - 11:30
+            normal_exit_time = datetime.combine(next_business_day, time(11, 30))
+        else: # Seg-Sex (jornada de 8h)
+            # Assumindo 07:30-11:30 (4h) e 13:00-17:00 (4h) -> Saída 17:00
+            normal_exit_time = datetime.combine(next_business_day, time(17, 0))
+            
+        # Calcula o horário de saída ajustado
+        # Se BH > 0 (crédito), sai mais cedo (subtrai)
+        # Se BH < 0 (débito), sai mais tarde (soma)
+        target_exit_time = normal_exit_time - timedelta(minutes=remaining_bh_minutes)
+        
+        return target_exit_time.strftime('%H:%M')
+    # --- FIM DAS NOVAS FUNÇÕES ---
 
     def on_recalculate_and_refresh(self):
         """
@@ -2304,6 +2452,8 @@ class App:
         self.tree_viewer.bind('<ButtonRelease-1>', self.start_in_place_edit)
         self.tree_viewer.tag_configure('evenrow', background='#112240')
         self.tree_viewer.tag_configure('oddrow', background='#172a45')
+        self.tree_viewer.tag_configure('incomplete', foreground='#FF6B6B') # Vermelho
+
 
         self.update_employee_filter()
         self._update_calendar_tags()
@@ -2403,18 +2553,15 @@ class App:
 
         selected_func = self.cmb_filter_func.get(); target_matricula = selected_func.split(" - ")[0] if selected_func != "Todos" else None; [self.tree_viewer.delete(i) for i in self.tree_viewer.get_children()]
 
-        try: # Adicionado try-except para capturar o NameError durante o carregamento
+        try:
             panorama_data = self.db.get_point_panorama(start_date, end_date, target_matricula)
         except NameError as ne:
-             # Mostra o erro no log e numa messagebox
              error_msg = f"Erro ao gerar panorama (NameError): {ne}. Verifique a função 'get_expected_daily_minutes'."
              self.append_log(f"ERRO: {error_msg}")
              messagebox.showerror("Erro de Cálculo", error_msg)
-             # Limpa a Treeview para não mostrar dados inconsistentes
              [self.tree_viewer.delete(i) for i in self.tree_viewer.get_children()]
-             panorama_data = [] # Define como lista vazia para o resto da função não quebrar
+             panorama_data = []
         except Exception as e:
-             # Captura outros erros possíveis
              error_msg = f"Erro inesperado ao gerar panorama: {e}"
              self.append_log(f"ERRO: {error_msg}")
              messagebox.showerror("Erro Inesperado", error_msg)
@@ -2428,7 +2575,14 @@ class App:
             punicao_minutos = self.db.get_total_punishment_minutes_for_day(item['Matricula'], data_db_str); punicao_hms = format_minutes_to_hms(punicao_minutos) if punicao_minutos > 0 else "00:00:00"
 
             values = (item['Matricula'], item['Nome'], data_ptbr, item['E1'], item['S1'], item['E2'], item['S2'], item['Carga_Horaria'], punicao_hms, item['Total_Desconto'])
-            tag = 'evenrow' if i % 2 == 0 else 'oddrow'; self.tree_viewer.insert("", "end", values=values, iid=(item['Matricula'], item['Data']), tags=(tag,))
+            
+            tags_para_linha = []
+            tags_para_linha.append('evenrow' if i % 2 == 0 else 'oddrow')
+            if item.get('is_incomplete', False):
+                tags_para_linha.append('incomplete')
+            
+            self.tree_viewer.insert("", "end", values=values, iid=(item['Matricula'], item['Data']), tags=tuple(tags_para_linha))
+            
             last_item = item
 
         if target_matricula:
@@ -2503,6 +2657,12 @@ class App:
             style_table_body = styles['Normal']
             style_table_body.fontSize = 7
             style_table_body.alignment = TA_CENTER
+            
+            style_table_body_incomplete = styles['Normal']
+            style_table_body_incomplete.fontSize = 7
+            style_table_body_incomplete.alignment = TA_CENTER
+            style_table_body_incomplete.textColor = colors.red
+
 
             style_nome = TableStyle([('ALIGN', (0,0), (0,0), 'LEFT'),
                                      ('ALIGN', (1,0), (1,0), 'RIGHT')])
@@ -2542,17 +2702,21 @@ class App:
 
             for item_id in data_rows:
                 values = self.tree_viewer.item(item_id, 'values')
+                tags = self.tree_viewer.item(item_id, 'tags')
+                
+                cell_style = style_table_body_incomplete if 'incomplete' in tags else style_table_body
+
                 row_data = [
-                    Paragraph(values[0], style_table_body),
-                    Paragraph(values[1], style_table_body),
-                    Paragraph(values[2], style_table_body),
-                    Paragraph(values[3], style_table_body),
-                    Paragraph(values[4], style_table_body),
-                    Paragraph(values[5], style_table_body),
-                    Paragraph(values[6], style_table_body),
-                    Paragraph(values[7], style_table_body),
-                    Paragraph(values[8], style_table_body),
-                    Paragraph(values[9], style_table_body),
+                    Paragraph(values[0], cell_style),
+                    Paragraph(values[1], cell_style),
+                    Paragraph(values[2], cell_style),
+                    Paragraph(values[3], cell_style),
+                    Paragraph(values[4], cell_style),
+                    Paragraph(values[5], cell_style),
+                    Paragraph(values[6], cell_style),
+                    Paragraph(values[7], cell_style),
+                    Paragraph(values[8], cell_style),
+                    Paragraph(values[9], cell_style),
                 ]
                 table_data.append(row_data)
 
@@ -2628,57 +2792,9 @@ class App:
         values = self.tree_viewer.item(item_id, 'values'); matricula = values[0]; data_ptbr = values[2]; data_db = datetime.strptime(data_ptbr, "%d/%m/%Y").strftime("%Y-%m-%d")
         all_times_raw = [values[3], values[4], values[5], values[6]]; func_info = self.db.get_funcionario_info(matricula); sector = func_info.get('setor', 'N/D'); minutos_totais_liquidos = 0
         penalidade_total_dia = 0
-        periodos_calculados = [] # Mantido para salvar no DB depois
+        periodos_calculados = []
+        is_incomplete = False # Flag para batida ímpar
 
-        for i in range(0, 4, 2):
-            e_time, s_time = all_times_raw[i], all_times_raw[i+1]
-            if e_time and s_time and e_time not in ('N/A', '00:00', '') and s_time not in ('N/A', '00:00', ''):
-                try:
-                    entrada = datetime.strptime(f"{data_db} {e_time}", "%Y-%m-%d %H:%M");
-                    saida = datetime.strptime(f"{data_db} {s_time}", "%Y-%m-%d %H:%M")
-                    if saida < entrada: saida += timedelta(days=1) # Considera virada de dia
-
-                    turno = "Manhã" if i == 0 else "Tarde"
-                    jornada_inicio = datetime.strptime(f"{data_db} {'07:30' if turno == 'Manhã' else '13:00'}", "%Y-%m-%d %H:%M")
-
-                    late_min = max(0, (entrada - jornada_inicio).total_seconds() / 60)
-                    deduction_min_periodo = calculate_deduction(late_min, sector) # Penalidade do período
-                    penalidade_total_dia += deduction_min_periodo # Acumula penalidade total do dia
-
-                    # --- NOVA LÓGICA DE CÁLCULO LÍQUIDO (VISUAL) ---
-                    inicio_efetivo = jornada_inicio + timedelta(minutes=deduction_min_periodo)
-                    inicio_real_contagem = max(entrada, inicio_efetivo)
-                    liquido_min_periodo = 0
-                    if saida > inicio_real_contagem:
-                        liquido_min_periodo = (saida - inicio_real_contagem).total_seconds() / 60
-                    # --- FIM NOVA LÓGICA (VISUAL) ---
-
-                    minutos_totais_liquidos += liquido_min_periodo # Acumula o líquido total do dia
-
-                    # Guarda os dados para salvar depois (importante manter a penalidade aqui)
-                    periodos_calculados.append({
-                        "entrada": str(entrada), "saida": str(saida),
-                        "minutos_brutos": format_minutes_to_hms((saida - entrada).total_seconds() / 60), # Bruto real
-                        "deducao_minutos": format_minutes_to_hms(deduction_min_periodo), # Penalidade calculada
-                        "minutos_liquidos": format_minutes_to_hms(liquido_min_periodo) # Líquido calculado com nova regra
-                    })
-                except ValueError:
-                    continue # Ignora período se hora inválida
-
-        new_values = list(values);
-        new_values[7] = format_minutes_to_hms(minutos_totais_liquidos) # Coluna Carga Horária mostra o líquido
-        new_values[9] = format_minutes_to_hms(penalidade_total_dia) # Coluna Total Desconto mostra a penalidade
-        self.tree_viewer.item(item_id, values=tuple(new_values))
-
-        edit_key = (matricula, data_db)
-        if edit_key in self.unsaved_edits:
-            # Atualiza os períodos recalculados para serem salvos corretamente
-            self.unsaved_edits[edit_key]['periodos_recalculados'] = periodos_calculados
-    # --- FIM DO AJUSTE VISUAL ---
-
-
-    def process_manual_update_and_save(self, matricula, data_db, all_times_raw, justificativa):
-        func_info = self.db.get_funcionario_info(matricula); sector = func_info.get('setor', 'N/D'); periodos, minutos_totais = [], 0
         for i in range(0, 4, 2):
             e_time, s_time = all_times_raw[i], all_times_raw[i+1]
             if e_time and s_time and e_time not in ('N/A', '00:00', '') and s_time not in ('N/A', '00:00', ''):
@@ -2691,34 +2807,130 @@ class App:
                     jornada_inicio = datetime.strptime(f"{data_db} {'07:30' if turno == 'Manhã' else '13:00'}", "%Y-%m-%d %H:%M")
 
                     late_min = max(0, (entrada - jornada_inicio).total_seconds() / 60)
-                    deduction_min = calculate_deduction(late_min, sector) # Penalidade do período
+                    deduction_min_periodo = calculate_deduction(late_min, sector)
+                    penalidade_total_dia += deduction_min_periodo
 
-                    # --- NOVA LÓGICA DE CÁLCULO LÍQUIDO (AO SALVAR) ---
+                    inicio_efetivo = jornada_inicio + timedelta(minutes=deduction_min_periodo)
+                    inicio_real_contagem = max(entrada, inicio_efetivo)
+                    liquido_min_periodo = 0
+                    if saida > inicio_real_contagem:
+                        liquido_min_periodo = (saida - inicio_real_contagem).total_seconds() / 60
+
+                    minutos_totais_liquidos += liquido_min_periodo
+
+                    periodos_calculados.append({
+                        "entrada": str(entrada), "saida": str(saida),
+                        "minutos_brutos": format_minutes_to_hms((saida - entrada).total_seconds() / 60),
+                        "deducao_minutos": format_minutes_to_hms(deduction_min_periodo),
+                        "minutos_liquidos": format_minutes_to_hms(liquido_min_periodo)
+                    })
+                except ValueError:
+                    continue
+            elif e_time and not s_time and e_time not in ('N/A', '00:00', ''):
+                try:
+                    is_incomplete = True # Marca como incompleto
+                    entrada = datetime.strptime(f"{data_db} {e_time}", "%Y-%m-%d %H:%M");
+                    
+                    turno = "Manhã" if i == 0 else "Tarde"
+                    jornada_inicio = datetime.strptime(f"{data_db} {'07:30' if turno == 'Manhã' else '13:00'}", "%Y-%m-%d %H:%M")
+
+                    late_min = max(0, (entrada - jornada_inicio).total_seconds() / 60)
+                    deduction_min_periodo = calculate_deduction(late_min, sector)
+                    penalidade_total_dia += deduction_min_periodo
+                    
+                    minutos_totais_liquidos += 0 
+                    
+                    periodos_calculados.append({
+                        "entrada": str(entrada), "saida": None,
+                        "minutos_brutos": "00:00:00",
+                        "deducao_minutos": format_minutes_to_hms(deduction_min_periodo),
+                        "minutos_liquidos": "00:00:00"
+                    })
+                except ValueError:
+                    continue
+
+        new_values = list(values);
+        new_values[7] = format_minutes_to_hms(minutos_totais_liquidos)
+        new_values[9] = format_minutes_to_hms(penalidade_total_dia)
+        
+        # Atualiza as tags da linha (remove/adiciona 'incomplete')
+        current_tags = list(self.tree_viewer.item(item_id, 'tags'))
+        if is_incomplete and 'incomplete' not in current_tags:
+            current_tags.append('incomplete')
+        elif not is_incomplete and 'incomplete' in current_tags:
+            current_tags.remove('incomplete')
+            
+        self.tree_viewer.item(item_id, values=tuple(new_values), tags=tuple(current_tags))
+
+
+        edit_key = (matricula, data_db)
+        if edit_key in self.unsaved_edits:
+            # Atualiza os períodos recalculados para serem salvos corretamente
+            self.unsaved_edits[edit_key]['periodos_recalculados'] = periodos_calculados
+
+
+    def process_manual_update_and_save(self, matricula, data_db, all_times_raw, justificativa):
+        func_info = self.db.get_funcionario_info(matricula); sector = func_info.get('setor', 'N/D'); periodos, minutos_totais = [], 0
+        for i in range(0, 4, 2):
+            e_time, s_time = all_times_raw[i], all_times_raw[i+1]
+            
+            # Caso 1: Período completo
+            if e_time and s_time and e_time not in ('N/A', '00:00', '') and s_time not in ('N/A', '00:00', ''):
+                try:
+                    entrada = datetime.strptime(f"{data_db} {e_time}", "%Y-%m-%d %H:%M");
+                    saida = datetime.strptime(f"{data_db} {s_time}", "%Y-%m-%d %H:%M")
+                    if saida < entrada: saida += timedelta(days=1)
+
+                    turno = "Manhã" if i == 0 else "Tarde"
+                    jornada_inicio = datetime.strptime(f"{data_db} {'07:30' if turno == 'Manhã' else '13:00'}", "%Y-%m-%d %H:%M")
+
+                    late_min = max(0, (entrada - jornada_inicio).total_seconds() / 60)
+                    deduction_min = calculate_deduction(late_min, sector)
+
                     inicio_efetivo = jornada_inicio + timedelta(minutes=deduction_min)
                     inicio_real_contagem = max(entrada, inicio_efetivo)
                     liquido_min = 0
                     if saida > inicio_real_contagem:
                         liquido_min = (saida - inicio_real_contagem).total_seconds() / 60
-                    # --- FIM NOVA LÓGICA (AO SALVAR) ---
 
-                    minutos_totais += liquido_min # Acumula o líquido total
+                    minutos_totais += liquido_min
                     periodos.append({
                         "entrada": str(entrada), "saida": str(saida),
-                        "minutos_brutos": format_minutes_to_hms((saida - entrada).total_seconds() / 60), # Bruto real
-                        "deducao_minutos": format_minutes_to_hms(deduction_min), # Penalidade calculada
-                        "minutos_liquidos": format_minutes_to_hms(liquido_min) # Líquido calculado com nova regra
+                        "minutos_brutos": format_minutes_to_hms((saida - entrada).total_seconds() / 60),
+                        "deducao_minutos": format_minutes_to_hms(deduction_min),
+                        "minutos_liquidos": format_minutes_to_hms(liquido_min)
                     })
                 except ValueError:
                     self.append_log(f"ERRO ao salvar formato de hora '{e_time}' ou '{s_time}' para {matricula} em {data_db}."); continue
+            
+            # Caso 2: Apenas Entrada
+            elif e_time and not s_time and e_time not in ('N/A', '00:00', ''):
+                try:
+                    entrada = datetime.strptime(f"{data_db} {e_time}", "%Y-%m-%d %H:%M");
+                    
+                    turno = "Manhã" if i == 0 else "Tarde"
+                    jornada_inicio = datetime.strptime(f"{data_db} {'07:30' if turno == 'Manhã' else '13:00'}", "%Y-%m-%d %H:%M")
+
+                    late_min = max(0, (entrada - jornada_inicio).total_seconds() / 60)
+                    deduction_min = calculate_deduction(late_min, sector)
+
+                    minutos_totais += 0
+                    periodos.append({
+                        "entrada": str(entrada), "saida": None,
+                        "minutos_brutos": "00:00:00",
+                        "deducao_minutos": format_minutes_to_hms(deduction_min),
+                        "minutos_liquidos": "00:00:00"
+                    })
+                except ValueError:
+                    self.append_log(f"ERRO ao salvar formato de hora '{e_time}' para {matricula} em {data_db}."); continue
 
         self.db.insert_horas_trabalhadas({
             "matricula": matricula,
             "data": data_db,
-            "minutos_totais": format_minutes_to_hms(minutos_totais), # Salva o total líquido
+            "minutos_totais": format_minutes_to_hms(minutos_totais),
             "periodos": periodos
         }, justificativa=justificativa)
         self.append_log(f"Ponto {matricula} {data_db} atualizado. Just: '{justificativa}'.")
-    # --- FIM DO AJUSTE AO SALVAR ---
 
 
     def commit_all_changes(self, from_exit=False):
@@ -2736,7 +2948,6 @@ class App:
         for (matricula, data_db), edits in self.unsaved_edits.items():
             affected_employees.add(matricula);
             justificativa = edits.get('justificativa', 'Ajuste Manual');
-            # A função process_manual_update_and_save agora usa a nova lógica interna
             self.process_manual_update_and_save(matricula, data_db, [edits.get('E1',''), edits.get('S1',''), edits.get('E2',''), edits.get('S2','')], justificativa)
 
         self.append_log("Recalculando saldos...");
