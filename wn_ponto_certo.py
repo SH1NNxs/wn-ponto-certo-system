@@ -2106,31 +2106,7 @@ class App:
                 story.append(Paragraph(f"<b>Extras:</b> {int(func_info.get('extras_disponiveis', 0))}", styles['Normal']))
                 story.append(Paragraph(f"<b>Banco de Horas:</b> {format_minutes_to_hms(func_info.get('banco_horas', 0))}", styles['Normal']))
 
-                # --- INÍCIO DA MODIFICAÇÃO (FICHADO) ---
-                try:
-                    remaining_bh = func_info.get('banco_horas', 0)
-                    
-                    # --- AJUSTE SOLICITADO ---
-                    # Determina a data base para encontrar o próximo dia útil
-                    start_search_date = date.today() # Padrão
-                    if payment_details.get('pay_partial_salary') and payment_details.get('end_date'):
-                        start_search_date = payment_details['end_date']
-                    # --- FIM AJUSTE SOLICITADO ---
-
-                    # Esta função é para 'fichado', então is_fichado=True
-                    next_business_day = self.find_next_business_day(start_search_date, is_fichado=True)
-                    target_exit_time = self.calculate_bh_zero_exit(remaining_bh, next_business_day)
-                    
-                    story.append(Spacer(1, 0.5*cm))
-                    story.append(Paragraph("<b>Informação para Zerar Banco de Horas:</b>", styles['h2']))
-                    info_text = (f"Para zerar o saldo de BH, o horário de saída no próximo dia útil, desde que seja respeitado o horário de entrada, "
-                                 f"(<b>{next_business_day.strftime('%d/%m/%Y')}</b>) deverá ser às <b>{target_exit_time}</b>.")
-                    story.append(Paragraph(info_text, styles['Normal']))
-                
-                except Exception as e:
-                    print(f"Erro ao calcular saída para zerar BH (fichado): {e}")
-                    story.append(Paragraph("<i>Não foi possível calcular o horário para zerar o BH.</i>", styles['Italic']))
-                # --- FIM DA MODIFICAÇÃO ---
+                # --- REMOÇÃO: Bloco de "Zerar Banco de Horas" foi removido daqui ---
 
                 story.append(Spacer(1, 2.5*cm))
                 story.append(Paragraph("________________________________________", styles['Normal']))
@@ -2333,29 +2309,7 @@ class App:
                 story.append(Paragraph(f"<b>Banco de Horas:</b> {format_minutes_to_hms(func_info.get('banco_horas', 0))}", styles['Normal']))
                 story.append(Paragraph(f"<b>Extras:</b> {int(func_info.get('extras_disponiveis', 0))}", styles['Normal']))
 
-                # --- INÍCIO DA MODIFICAÇÃO (NÃO FICHADO) ---
-                try:
-                    remaining_bh = func_info.get('banco_horas', 0)
-                    
-                    # --- AJUSTE SOLICITADO ---
-                    # Para não fichado, a data base é sempre o fim do período de diárias
-                    start_search_date = payment_details['end_date']
-                    # --- FIM AJUSTE SOLICITADO ---
-
-                    # Esta função é para 'não fichado', então is_fichado=False
-                    next_business_day = self.find_next_business_day(start_search_date, is_fichado=False)
-                    target_exit_time = self.calculate_bh_zero_exit(remaining_bh, next_business_day)
-                    
-                    story.append(Spacer(1, 0.5*cm))
-                    story.append(Paragraph("<b>Informação para Zerar Banco de Horas:</b>", styles['h2']))
-                    info_text = (f"Para zerar o saldo de BH, o horário de saída no próximo dia útil "
-                                 f"(<b>{next_business_day.strftime('%d/%m/%Y')}</b>) deverá ser às <b>{target_exit_time}</b>.")
-                    story.append(Paragraph(info_text, styles['Normal']))
-                
-                except Exception as e:
-                    print(f"Erro ao calcular saída para zerar BH (não fichado): {e}")
-                    story.append(Paragraph("<i>Não foi possível calcular o horário para zerar o BH.</i>", styles['Italic']))
-                # --- FIM DA MODIFICAÇÃO ---
+                # --- REMOÇÃO: Bloco de "Zerar Banco de Horas" foi removido daqui ---
 
                 story.append(Spacer(1, 2.5*cm))
                 story.append(Paragraph("________________________________________", styles['Normal']))
@@ -2439,7 +2393,7 @@ class App:
                                f"TOTAL A PAGAR: R$ {total_payment:.2f}\n\n"
                                f"Confirma a geração do relatório e DEDUÇÃO DAS EXTRAS?")
 
-                if not messagebox.askyesno("Confirmar Pagamento", msg_confirm, parent=win):
+                if not messagebox.askyesno("Confirmar Pagamento", msg_confirm):
                     return
 
                 payment_details = {
@@ -3497,6 +3451,10 @@ class App:
         if not filepath:
             return
 
+        # --- NOVA LÓGICA: DIAS DA SEMANA ---
+        dias_semana = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"]
+        # --- FIM ---
+
         try:
             doc = SimpleDocTemplate(filepath, pagesize=landscape(A4), rightMargin=1.5*cm, leftMargin=1.5*cm, topMargin=1.5*cm, bottomMargin=1.5*cm)
             styles = getSampleStyleSheet()
@@ -3521,6 +3479,8 @@ class App:
             style_table_body = styles['Normal']
             style_table_body.fontSize = 7
             style_table_body.alignment = TA_CENTER
+            # --- MUDANÇA DE COR ---
+            style_table_body.textColor = colors.black # Melhor para impressão
             
             style_table_body_incomplete = styles['Normal']
             style_table_body_incomplete.fontSize = 7
@@ -3557,12 +3517,34 @@ class App:
                 saldo_table.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'MIDDLE')]))
                 story.append(saldo_table)
 
+                # --- NOVA LÓGICA: CÁLCULO DE SAÍDA PARA ZERAR BH ---
+                try:
+                    func_info = self.db.get_funcionario_info(target_matricula)
+                    is_fichado = func_info.get('fichado', 0) == 1
+                    remaining_bh = func_info.get('banco_horas', 0)
+                    
+                    # Base date is the report's end date
+                    base_date = end_date
+                    next_business_day = self.find_next_business_day(base_date, is_fichado)
+                    target_exit_time = self.calculate_bh_zero_exit(remaining_bh, next_business_day)
+                    
+                    info_text = (f"<b>Informação Adicional:</b> Para zerar o saldo de BH, a saída no próximo dia útil "
+                                 f"(<b>{next_business_day.strftime('%d/%m/%Y')}</b>) deverá ser às <b>{target_exit_time}</b>.")
+                    story.append(Spacer(1, 0.25*cm))
+                    story.append(Paragraph(info_text, styles['Normal'])) # Use standard black text
+                except Exception as e:
+                    print(f"Erro ao calcular saída para zerar BH (Espelho): {e}")
+                    story.append(Paragraph("<i>Não foi possível calcular o horário para zerar o BH.</i>", styles['Italic']))
+                # --- FIM DA NOVA LÓGICA ---
+
             story.append(Spacer(1, 1*cm))
 
-            col_headers = ["Mat.", "Nome", "Data", "E1", "S1", "E2", "S2", "Carga", "Punição", "Desconto"]
+            # --- COLUNA E LARGURA ATUALIZADAS ---
+            col_headers = ["Dia", "Mat.", "Nome", "Data", "E1", "S1", "E2", "S2", "Carga", "Punição", "Desconto"]
             table_data = [[Paragraph(h, style_table_header) for h in col_headers]]
 
-            col_widths = [1.8*cm, 5.5*cm, 2.5*cm, 1.8*cm, 1.8*cm, 1.8*cm, 1.8*cm, 2.5*cm, 2.5*cm, 2.5*cm]
+            col_widths = [2.2*cm, 1.8*cm, 5.5*cm, 2.5*cm, 1.8*cm, 1.8*cm, 1.8*cm, 1.8*cm, 2.5*cm, 2.5*cm, 2.5*cm]
+            # --- FIM DA ATUALIZAÇÃO ---
 
             for item_id in data_rows:
                 values = self.tree_viewer.item(item_id, 'values')
@@ -3570,7 +3552,17 @@ class App:
                 
                 cell_style = style_table_body_incomplete if 'incomplete' in tags else style_table_body
 
+                # --- LÓGICA PARA PEGAR O DIA DA SEMANA ---
+                try:
+                    data_dt = datetime.strptime(values[2], '%d/%m/%Y').date()
+                    dia_semana_str = dias_semana[data_dt.weekday()]
+                except:
+                    dia_semana_str = "---"
+                # --- FIM ---
+
+                # --- LINHA DE DADOS ATUALIZADA ---
                 row_data = [
+                    Paragraph(dia_semana_str, cell_style), # <-- NOVA CÉLULA
                     Paragraph(values[0], cell_style),
                     Paragraph(values[1], cell_style),
                     Paragraph(values[2], cell_style),
@@ -3582,18 +3574,34 @@ class App:
                     Paragraph(values[8], cell_style),
                     Paragraph(values[9], cell_style),
                 ]
+                # --- FIM ---
                 table_data.append(row_data)
 
             t = Table(table_data, colWidths=col_widths)
-            t.setStyle(TableStyle([
+            
+            # --- INÍCIO DA CORREÇÃO ---
+            # 1. Criar a lista de comandos de estilo
+            style_commands = [
                 ('BACKGROUND', (0,0), (-1,0), colors.teal),
                 ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
                 ('GRID', (0,0), (-1,-1), 1, colors.black),
                 ('BOX', (0,0), (-1,-1), 1, colors.black),
                 ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-                ('ALIGN', (0,1), (0,-1), 'LEFT'),
-                ('ALIGN', (1,1), (1,-1), 'LEFT'),
-            ]))
+            ]
+
+            # 2. Adicionar os comandos de cores alternadas
+            for i in range(1, len(table_data)):
+                color = colors.lightgrey if i % 2 == 0 else colors.whitesmoke
+                style_commands.append(('BACKGROUND', (0,i), (-1,i), color))
+            
+            # 3. Adicionar os comandos de alinhamento
+            style_commands.append(('ALIGN', (1,1), (1,-1), 'LEFT')) # Coluna "Mat."
+            style_commands.append(('ALIGN', (2,1), (2,-1), 'LEFT')) # Coluna "Nome"
+            
+            # 4. Aplicar o TableStyle COM TODOS os comandos
+            t.setStyle(TableStyle(style_commands))
+            # --- FIM DA CORREÇÃO ---
+            
             story.append(t)
 
             if target_matricula != "Todos":
@@ -3718,6 +3726,12 @@ class App:
         new_values[9] = format_minutes_to_hms(penalidade_total_dia)
         
         # Atualiza as tags da linha (remove/adiciona 'incomplete')
+        current_tags = list(self.tree_viewer.item(item_id, 'tags'))
+        if is_incomplete and 'incomplete' not in current_tags:
+            current_tags.append('incomplete')
+        elif not is_incomplete and 'incomplete' in current_tags:
+            current_tags
+# Atualiza as tags da linha (remove/adiciona 'incomplete')
         current_tags = list(self.tree_viewer.item(item_id, 'tags'))
         if is_incomplete and 'incomplete' not in current_tags:
             current_tags.append('incomplete')
