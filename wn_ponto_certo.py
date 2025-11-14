@@ -21,7 +21,7 @@ try:
     from reportlab.lib.pagesizes import A4, landscape
     from reportlab.lib.units import cm
     from reportlab.pdfgen import canvas
-    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
     from reportlab.lib import colors
     from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
@@ -3421,433 +3421,440 @@ class App:
         elif hasattr(self, 'punishment_listbox'):
             self.punishment_listbox.delete(0, tk.END); self.lbl_total_punishments.config(text="Total Punições: --")
 
+    # --- INÍCIO DA CORREÇÃO DE INDENTAÇÃO ---
+    # (Todas as funções abaixo foram indentadas para pertencer à classe App)
+    
     def on_export_panorama(self):
-        selected_func_str = self.cmb_filter_func.get()
-        start_date = self.selected_start_date
-        end_date = self.selected_end_date
+            selected_func_str = self.cmb_filter_func.get()
+            start_date = self.selected_start_date
+            end_date = self.selected_end_date
 
-        if not start_date or not end_date:
-            messagebox.showerror("Erro", "Selecione um período válido (Data Início e Fim).")
-            return
+            if not start_date or not end_date:
+                messagebox.showerror("Erro", "Selecione um período válido (Data Início e Fim).")
+                return
 
-        if not selected_func_str:
-            messagebox.showerror("Erro", "Selecione um funcionário.")
-            return
+            if not selected_func_str:
+                messagebox.showerror("Erro", "Selecione um funcionário.")
+                return
 
-        data_rows = self.tree_viewer.get_children("")
-        if not data_rows:
-            messagebox.showinfo("Aviso", "Não há dados para exportar na visão atual.")
-            return
+            data_rows = self.tree_viewer.get_children("")
+            if not data_rows:
+                messagebox.showinfo("Aviso", "Não há dados para exportar na visão atual.")
+                return
 
-        target_matricula = selected_func_str.split(" - ")[0] if selected_func_str != "Todos" else "Todos"
-        nome_func = " ".join(selected_func_str.split(" - ")[1:]) if selected_func_str != "Todos" else "Todos_Funcionarios"
+            target_matricula = selected_func_str.split(" - ")[0] if selected_func_str != "Todos" else "Todos"
+            nome_func = " ".join(selected_func_str.split(" - ")[1:]) if selected_func_str != "Todos" else "Todos_Funcionarios"
 
-        filepath = filedialog.asksaveasfilename(
-            defaultextension=".pdf",
-            filetypes=[("PDF files", "*.pdf")],
-            title="Salvar Espelho de Ponto",
-            initialfile=f"Espelho_Ponto_{nome_func.replace(' ','_')}_{start_date.isoformat()}_a_{end_date.isoformat()}.pdf"
-        )
-        if not filepath:
-            return
+            filepath = filedialog.asksaveasfilename(
+                defaultextension=".pdf",
+                filetypes=[("PDF files", "*.pdf")],
+                title="Salvar Espelho de Ponto",
+                initialfile=f"Espelho_Ponto_{nome_func.replace(' ','_')}_{start_date.isoformat()}_a_{end_date.isoformat()}.pdf"
+            )
+            if not filepath:
+                return
 
-        # --- NOVA LÓGICA: DIAS DA SEMANA ---
-        dias_semana = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"]
-        # --- FIM ---
+            # --- NOVA LÓGICA: DIAS DA SEMANA --- (AGORA INDENTADO)
+            dias_semana = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"]
+            # --- FIM ---
 
-        try:
-            doc = SimpleDocTemplate(filepath, pagesize=landscape(A4), rightMargin=1.5*cm, leftMargin=1.5*cm, topMargin=1.5*cm, bottomMargin=1.5*cm)
-            styles = getSampleStyleSheet()
-            story = []
+            try: # (AGORA INDENTADO)
+                doc = SimpleDocTemplate(filepath, pagesize=landscape(A4), rightMargin=1.5*cm, leftMargin=1.5*cm, topMargin=1.5*cm, bottomMargin=1.5*cm)
+                styles = getSampleStyleSheet()
+                story = []
 
-            style_title = styles['h1']
-            style_title.alignment = TA_CENTER
-            style_title.textColor = colors.teal
+                style_title = styles['h1']
+                style_title.alignment = TA_CENTER
+                style_title.textColor = colors.teal
 
-            style_header = styles['h2']
-            style_header.fontSize = 10
-            style_header.alignment = TA_LEFT
+                style_header = styles['h2']
+                style_header.fontSize = 10
+                style_header.alignment = TA_LEFT
 
-            style_body = styles['Normal']
-            style_body.fontSize = 8
+                style_body = styles['Normal']
+                style_body.fontSize = 8
 
-            style_table_header = styles['Normal']
-            style_table_header.fontSize = 8
-            style_table_header.fontName = 'Helvetica-Bold'
-            style_table_header.alignment = TA_CENTER
+                style_table_header = styles['Normal']
+                style_table_header.fontSize = 8
+                style_table_header.fontName = 'Helvetica-Bold'
+                style_table_header.alignment = TA_CENTER
 
-            style_table_body = styles['Normal']
-            style_table_body.fontSize = 7
-            style_table_body.alignment = TA_CENTER
-            # --- MUDANÇA DE COR ---
-            style_table_body.textColor = colors.black # Melhor para impressão
-            
-            style_table_body_incomplete = styles['Normal']
-            style_table_body_incomplete.fontSize = 7
-            style_table_body_incomplete.alignment = TA_CENTER
-            style_table_body_incomplete.textColor = colors.red
-
-
-            style_nome = TableStyle([('ALIGN', (0,0), (0,0), 'LEFT'),
-                                     ('ALIGN', (1,0), (1,0), 'RIGHT')])
-
-            if LOGO_PATH.exists():
-                story.append(Image(LOGO_PATH, width=3*cm, height=3*cm, hAlign='CENTER'))
-                story.append(Spacer(1, 0.2*cm))
-
-            story.append(Paragraph("Espelho de Ponto", style_title))
-            story.append(Spacer(1, 1*cm))
-
-            story.append(Paragraph(f"<b>Período:</b> {start_date.strftime('%d/%m/%Y')} a {end_date.strftime('%d/%m/%Y')}", styles['Normal']))
-
-            if target_matricula != "Todos":
-                story.append(Paragraph(f"<b>Funcionário:</b> {nome_func} (Mat. {target_matricula})", styles['Normal']))
-                story.append(Spacer(1, 0.5*cm))
-
-                last_bh_saldo = self.lbl_saldo_bh_total.cget('text')
-                last_extras = self.lbl_saldo_extras_total.cget('text')
-
-                saldo_data = [
-                    [Paragraph(f"<b>BH Saldo Final ({end_date.strftime('%d/%m')}):</b> {last_bh_saldo}", style_header),
-                     Paragraph(f"<b>Extras ({end_date.strftime('%d/%m')}):</b> {last_extras}", style_header),
-                     Paragraph(f"<b>Fichado:</b> {self.lbl_fichado_status.cget('text')}", style_header),
-                     Paragraph(f"<b>Setor:</b> {self.lbl_setor_status.cget('text')}", style_header)]
-                ]
-                saldo_table = Table(saldo_data, colWidths=[6*cm, 6*cm, 6*cm, 8*cm])
-                saldo_table.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'MIDDLE')]))
-                story.append(saldo_table)
-
-                # --- NOVA LÓGICA: CÁLCULO DE SAÍDA PARA ZERAR BH ---
-                try:
-                    func_info = self.db.get_funcionario_info(target_matricula)
-                    is_fichado = func_info.get('fichado', 0) == 1
-                    remaining_bh = func_info.get('banco_horas', 0)
-                    
-                    # Base date is the report's end date
-                    base_date = end_date
-                    next_business_day = self.find_next_business_day(base_date, is_fichado)
-                    target_exit_time = self.calculate_bh_zero_exit(remaining_bh, next_business_day)
-                    
-                    info_text = (f"<b>Informação Adicional:</b> Para zerar o saldo de BH, a saída no próximo dia útil "
-                                 f"(<b>{next_business_day.strftime('%d/%m/%Y')}</b>) deverá ser às <b>{target_exit_time}</b>.")
-                    story.append(Spacer(1, 0.25*cm))
-                    story.append(Paragraph(info_text, styles['Normal'])) # Use standard black text
-                except Exception as e:
-                    print(f"Erro ao calcular saída para zerar BH (Espelho): {e}")
-                    story.append(Paragraph("<i>Não foi possível calcular o horário para zerar o BH.</i>", styles['Italic']))
-                # --- FIM DA NOVA LÓGICA ---
-
-            story.append(Spacer(1, 1*cm))
-
-            # --- COLUNA E LARGURA ATUALIZADAS ---
-            col_headers = ["Dia", "Mat.", "Nome", "Data", "E1", "S1", "E2", "S2", "Carga", "Punição", "Desconto"]
-            table_data = [[Paragraph(h, style_table_header) for h in col_headers]]
-
-            col_widths = [2.2*cm, 1.8*cm, 5.5*cm, 2.5*cm, 1.8*cm, 1.8*cm, 1.8*cm, 1.8*cm, 2.5*cm, 2.5*cm, 2.5*cm]
-            # --- FIM DA ATUALIZAÇÃO ---
-
-            for item_id in data_rows:
-                values = self.tree_viewer.item(item_id, 'values')
-                tags = self.tree_viewer.item(item_id, 'tags')
+                style_table_body = styles['Normal']
+                style_table_body.fontSize = 7
+                style_table_body.alignment = TA_CENTER
+                # --- MUDANÇA DE COR ---
+                style_table_body.textColor = colors.black # Melhor para impressão
                 
-                cell_style = style_table_body_incomplete if 'incomplete' in tags else style_table_body
+                style_table_body_incomplete = styles['Normal']
+                style_table_body_incomplete.fontSize = 7
+                style_table_body_incomplete.alignment = TA_CENTER
+                style_table_body_incomplete.textColor = colors.black
 
-                # --- LÓGICA PARA PEGAR O DIA DA SEMANA ---
-                try:
-                    data_dt = datetime.strptime(values[2], '%d/%m/%Y').date()
-                    dia_semana_str = dias_semana[data_dt.weekday()]
-                except:
-                    dia_semana_str = "---"
-                # --- FIM ---
 
-                # --- LINHA DE DADOS ATUALIZADA ---
-                row_data = [
-                    Paragraph(dia_semana_str, cell_style), # <-- NOVA CÉLULA
-                    Paragraph(values[0], cell_style),
-                    Paragraph(values[1], cell_style),
-                    Paragraph(values[2], cell_style),
-                    Paragraph(values[3], cell_style),
-                    Paragraph(values[4], cell_style),
-                    Paragraph(values[5], cell_style),
-                    Paragraph(values[6], cell_style),
-                    Paragraph(values[7], cell_style),
-                    Paragraph(values[8], cell_style),
-                    Paragraph(values[9], cell_style),
-                ]
-                # --- FIM ---
-                table_data.append(row_data)
+                style_nome = TableStyle([('ALIGN', (0,0), (0,0), 'LEFT'),
+                                         ('ALIGN', (1,0), (1,0), 'RIGHT')])
 
-            t = Table(table_data, colWidths=col_widths)
-            
-            # --- INÍCIO DA CORREÇÃO ---
-            # 1. Criar a lista de comandos de estilo
-            style_commands = [
-                ('BACKGROUND', (0,0), (-1,0), colors.teal),
-                ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
-                ('GRID', (0,0), (-1,-1), 1, colors.black),
-                ('BOX', (0,0), (-1,-1), 1, colors.black),
-                ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-            ]
+                if LOGO_PATH.exists():
+                    story.append(Image(LOGO_PATH, width=3*cm, height=3*cm, hAlign='CENTER'))
+                    story.append(Spacer(1, 0.2*cm))
 
-            # 2. Adicionar os comandos de cores alternadas
-            for i in range(1, len(table_data)):
-                color = colors.lightgrey if i % 2 == 0 else colors.whitesmoke
-                style_commands.append(('BACKGROUND', (0,i), (-1,i), color))
-            
-            # 3. Adicionar os comandos de alinhamento
-            style_commands.append(('ALIGN', (1,1), (1,-1), 'LEFT')) # Coluna "Mat."
-            style_commands.append(('ALIGN', (2,1), (2,-1), 'LEFT')) # Coluna "Nome"
-            
-            # 4. Aplicar o TableStyle COM TODOS os comandos
-            t.setStyle(TableStyle(style_commands))
-            # --- FIM DA CORREÇÃO ---
-            
-            story.append(t)
+                story.append(Paragraph("Espelho de Ponto", style_title))
+                story.append(Spacer(1, 1*cm))
 
-            if target_matricula != "Todos":
-                story.append(Spacer(1, 2.5*cm))
-                story.append(Paragraph("________________________________________", styles['Normal']))
-                story.append(Paragraph(nome_func, styles['Normal']))
-                story.append(Paragraph(f"Data: ____/____/{datetime.now().year}", styles['Normal']))
+                story.append(Paragraph(f"<b>Período:</b> {start_date.strftime('%d/%m/%Y')} a {end_date.strftime('%d/%m/%Y')}", styles['Normal']))
 
-            doc.build(story)
-            messagebox.showinfo("Sucesso", f"Espelho de Ponto salvo:\n{filepath}")
+                if target_matricula != "Todos":
+                    story.append(Paragraph(f"<b>Funcionário:</b> {nome_func} (Mat. {target_matricula})", styles['Normal']))
+                    story.append(Spacer(1, 0.5*cm))
 
-        except PermissionError:
-             messagebox.showerror("Erro", f"Erro de Permissão.\nO arquivo '{filepath}' pode estar aberto. Feche-o e tente novamente.")
-        except Exception as e:
-            messagebox.showerror("Erro PDF", f"Não foi possível gerar o PDF: {e}")
-            self.append_log(f"ERRO PDF: {e}")
+                    last_bh_saldo = self.lbl_saldo_bh_total.cget('text')
+                    last_extras = self.lbl_saldo_extras_total.cget('text')
+
+                    saldo_data = [
+                        [Paragraph(f"<b>BH Saldo Final ({end_date.strftime('%d/%m')}):</b> {last_bh_saldo}", style_header),
+                         Paragraph(f"<b>Extras ({end_date.strftime('%d/%m')}):</b> {last_extras}", style_header),
+                         Paragraph(f"<b>Fichado:</b> {self.lbl_fichado_status.cget('text')}", style_header),
+                         Paragraph(f"<b>Setor:</b> {self.lbl_setor_status.cget('text')}", style_header)]
+                    ]
+                    saldo_table = Table(saldo_data, colWidths=[6*cm, 6*cm, 6*cm, 8*cm])
+                    saldo_table.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'MIDDLE')]))
+                    story.append(saldo_table)
+
+                    # --- NOVA LÓGICA: CÁLCULO DE SAÍDA PARA ZERAR BH ---
+                    try:
+                        func_info = self.db.get_funcionario_info(target_matricula)
+                        is_fichado = func_info.get('fichado', 0) == 1
+                        remaining_bh = func_info.get('banco_horas', 0)
+
+                        # Base date is the report's end date
+                        base_date = end_date
+                        next_business_day = self.find_next_business_day(base_date, is_fichado)
+                        target_exit_time = self.calculate_bh_zero_exit(remaining_bh, next_business_day)
+
+                        # --- MODIFICAÇÃO: Criar estilo com fonte maior ---
+                        # Crie um novo estilo para a informação adicional
+                        style_info_adicional = ParagraphStyle(
+                            name='InfoAdicional',
+                            parent=styles['Normal'],  # Baseado no estilo Normal
+                            fontSize=12,  # Aumenta o tamanho da fonte (padrão é 10pt)
+                            textColor=colors.black  # Garante que é preto
+                        )
+
+                        info_text = (f"<b>Informação Adicional:</b> Para zerar o saldo de BH, a saída no próximo dia útil "
+                                     f"(<b>{next_business_day.strftime('%d/%m/%Y')}</b>) deverá ser às <b>{target_exit_time}</b>.")
+                        story.append(Spacer(1, 0.25*cm))
+                        story.append(Paragraph(info_text, style_info_adicional))  # Use o novo estilo
+                    except Exception as e:
+                        print(f"Erro ao calcular saída para zerar BH (Espelho): {e}")
+                        story.append(Paragraph("<i>Não foi possível calcular o horário para zerar o BH.</i>", styles['Italic']))
+            # --- FIM DA NOVA LÓGICA ---
+
+                    story.append(Spacer(1, 1*cm))
+
+                    # --- COLUNA E LARGURA ATUALIZADAS ---
+                    col_headers = ["Dia", "Mat.", "Nome", "Data", "E1", "S1", "E2", "S2", "Carga", "Punição", "Desconto"]
+                    table_data = [[Paragraph(h, style_table_header) for h in col_headers]]
+
+                    col_widths = [2.2*cm, 1.8*cm, 5.5*cm, 2.5*cm, 1.8*cm, 1.8*cm, 1.8*cm, 1.8*cm, 2.5*cm, 2.5*cm, 2.5*cm]
+                    # --- FIM DA ATUALIZAÇÃO ---
+
+                    for item_id in data_rows:
+                        values = self.tree_viewer.item(item_id, 'values')
+                        tags = self.tree_viewer.item(item_id, 'tags')
+                        
+                        cell_style = style_table_body_incomplete if 'incomplete' in tags else style_table_body
+
+                        # --- LÓGICA PARA PEGAR O DIA DA SEMANA ---
+                        try:
+                            data_dt = datetime.strptime(values[2], '%d/%m/%Y').date()
+                            dia_semana_str = dias_semana[data_dt.weekday()]
+                        except:
+                            dia_semana_str = "---"
+                        # --- FIM ---
+
+                        # --- LINHA DE DADOS ATUALIZADA ---
+                        row_data = [
+                            Paragraph(dia_semana_str, cell_style), # <-- NOVA CÉLULA
+                            Paragraph(values[0], cell_style),
+                            Paragraph(values[1], cell_style),
+                            Paragraph(values[2], cell_style),
+                            Paragraph(values[3], cell_style),
+                            Paragraph(values[4], cell_style),
+                            Paragraph(values[5], cell_style),
+                            Paragraph(values[6], cell_style),
+                            Paragraph(values[7], cell_style),
+                            Paragraph(values[8], cell_style),
+                            Paragraph(values[9], cell_style),
+                        ]
+                        # --- FIM ---
+                        table_data.append(row_data)
+
+                    t = Table(table_data, colWidths=col_widths)
+                    
+                    # --- INÍCIO DA CORREÇÃO ---
+                    # 1. Criar a lista de comandos de estilo
+                    style_commands = [
+                        ('BACKGROUND', (0,0), (-1,0), colors.teal),
+                        ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+                        ('GRID', (0,0), (-1,-1), 1, colors.black),
+                        ('BOX', (0,0), (-1,-1), 1, colors.black),
+                        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                    ]
+
+                    # 2. Adicionar os comandos de cores alternadas
+                    for i in range(1, len(table_data)):
+                        color = colors.lightgrey if i % 2 == 0 else colors.whitesmoke
+                        style_commands.append(('BACKGROUND', (0,i), (-1,i), color))
+                    
+                    # 3. Adicionar os comandos de alinhamento
+                    style_commands.append(('ALIGN', (1,1), (1,-1), 'LEFT')) # Coluna "Mat."
+                    style_commands.append(('ALIGN', (2,1), (2,-1), 'LEFT')) # Coluna "Nome"
+                    
+                    # 4. Aplicar o TableStyle COM TODOS os comandos
+                    t.setStyle(TableStyle(style_commands))
+                    # --- FIM DA CORREÇÃO ---
+                    
+                    story.append(t)
+
+                    story.append(Spacer(1, 2.5*cm))
+                    story.append(Paragraph("________________________________________", styles['Normal']))
+                    story.append(Paragraph(nome_func, styles['Normal']))
+                    story.append(Paragraph(f"Data: ____/____/{datetime.now().year}", styles['Normal']))
+
+                    doc.build(story)
+                    messagebox.showinfo("Sucesso", f"Espelho de Ponto salvo:\n{filepath}")
+
+            except PermissionError:
+                messagebox.showerror("Erro", f"Erro de Permissão.\nO arquivo '{filepath}' pode estar aberto. Feche-o e tente novamente.")
+            except Exception as e:
+                messagebox.showerror("Erro PDF", f"Não foi possível gerar o PDF: {e}")
+                self.append_log(f"ERRO PDF: {e}")
 
     def append_log(self, text):
-        if hasattr(self, 'log_area'):
-            self.log_area.insert(tk.END, f"{datetime.now().strftime('%H:%M:%S')} - {text}\n");
-            self.log_area.see(tk.END)
-        else:
-            print(text)
-
+            if hasattr(self, 'log_area'):
+                self.log_area.insert(tk.END, f"{datetime.now().strftime('%H:%M:%S')} - {text}\n");
+                self.log_area.see(tk.END)
+            else:
+                print(text)
+                
     def start_in_place_edit(self, event):
-        if self.editing_widgets: [w.destroy() for w in self.editing_widgets.values()]; self.editing_widgets.clear()
-        item_id = self.tree_viewer.identify_row(event.y);
-        if not item_id: return
-        column_id = self.tree_viewer.identify_column(event.x)
-        try: col_index = int(column_id.replace('#', '')) - 1 ; column_name = self.tree_viewer.heading(column_id, 'text')
-        except: self.append_log(f"Erro edição: coluna."); return
-        editable_columns = ["E1", "S1", "E2", "S2"];
-        if column_name not in editable_columns: return
-        x, y, width, height = self.tree_viewer.bbox(item_id, column_id); values = self.tree_viewer.item(item_id, 'values'); matricula, data_ptbr, current_time = values[0], values[2], values[col_index]
-        data_db = datetime.strptime(data_ptbr, "%d/%m/%Y").strftime("%Y-%m-%d");
+            if self.editing_widgets: [w.destroy() for w in self.editing_widgets.values()]; self.editing_widgets.clear()
+            item_id = self.tree_viewer.identify_row(event.y);
+            if not item_id: return
+            column_id = self.tree_viewer.identify_column(event.x)
+            try: col_index = int(column_id.replace('#', '')) - 1 ; column_name = self.tree_viewer.heading(column_id, 'text')
+            except: self.append_log(f"Erro edição: coluna."); return
+            editable_columns = ["E1", "S1", "E2", "S2"];
+            if column_name not in editable_columns: return
+            x, y, width, height = self.tree_viewer.bbox(item_id, column_id); values = self.tree_viewer.item(item_id, 'values'); matricula, data_ptbr, current_time = values[0], values[2], values[col_index]
+            data_db = datetime.strptime(data_ptbr, "%d/%m/%Y").strftime("%Y-%m-%d");
 
-        if data_db < SYSTEM_START_DATE:
-            self.append_log(f"Edição bloqueada. Data {data_db} é anterior ao início do sistema ({SYSTEM_START_DATE}).")
-            return
+            if data_db < SYSTEM_START_DATE:
+                self.append_log(f"Edição bloqueada. Data {data_db} é anterior ao início do sistema ({SYSTEM_START_DATE}).")
+                return
 
-        entry_edit = ttk.Entry(self.tree_viewer); entry_edit.place(x=x, y=y, width=width, height=height)
-        entry_edit.insert(0, current_time if current_time not in ('', 'N/A') else ''); entry_edit.focus(); justificativa_cmb = ttk.Combobox(self.tree_viewer, values=LISTA_JUSTIFICATIVAS, state="readonly", width=30); justificativa_cmb.place(x=x + width + 5, y=y, height=height)
-        edit_key = (matricula, data_db); justificativa_cmb.set(self.unsaved_edits.get(edit_key, {}).get('justificativa', LISTA_JUSTIFICATIVAS[0])); self.editing_widgets = {'entry': entry_edit, 'cmb': justificativa_cmb}
-        def on_escape(e=None):
-             if self.editing_widgets: [w.destroy() for w in self.editing_widgets.values()]; self.editing_widgets.clear()
-        def handle_edit(from_cmb=False):
-            if not self.editing_widgets: return
-            entry = self.editing_widgets.get('entry'); cmb = self.editing_widgets.get('cmb');
-            if not entry or not cmb: return
-            new_time, just = entry.get().strip(), cmb.get()
-            if not (re.match(r'^\d{2}:\d{2}$', new_time) or new_time in ('', 'N/A', '00:00')):
-                if new_time != current_time: messagebox.showerror("Erro Formato", "Formato de hora inválido. Use HH:MM.", parent=self.root); on_escape(); return
-            temp_vals = list(self.tree_viewer.item(item_id, 'values')); temp_vals[col_index] = new_time; self.tree_viewer.item(item_id, values=tuple(temp_vals))
-            if edit_key not in self.unsaved_edits: current_row_values = self.tree_viewer.item(item_id, 'values'); self.unsaved_edits[edit_key] = {'E1': current_row_values[3], 'S1': current_row_values[4], 'E2': current_row_values[5], 'S2': current_row_values[6]}
-            self.unsaved_edits[edit_key][column_name] = new_time; self.unsaved_edits[edit_key]['justificativa'] = just; self.update_visual_work_hours(item_id)
-            if from_cmb: on_escape()
-        entry_edit.bind('<Return>', lambda e: handle_edit(from_cmb=True)); entry_edit.bind('<Escape>', on_escape); entry_edit.bind('<FocusOut>', lambda e: on_escape()); justificativa_cmb.bind('<<ComboboxSelected>>', lambda e: handle_edit(from_cmb=True)); justificativa_cmb.bind('<Escape>', on_escape)
+            entry_edit = ttk.Entry(self.tree_viewer); entry_edit.place(x=x, y=y, width=width, height=height)
+            entry_edit.insert(0, current_time if current_time not in ('', 'N/A') else ''); entry_edit.focus(); justificativa_cmb = ttk.Combobox(self.tree_viewer, values=LISTA_JUSTIFICATIVAS, state="readonly", width=30); justificativa_cmb.place(x=x + width + 5, y=y, height=height)
+            edit_key = (matricula, data_db); justificativa_cmb.set(self.unsaved_edits.get(edit_key, {}).get('justificativa', LISTA_JUSTIFICATIVAS[0])); self.editing_widgets = {'entry': entry_edit, 'cmb': justificativa_cmb}
+            def on_escape(e=None):
+                 if self.editing_widgets: [w.destroy() for w in self.editing_widgets.values()]; self.editing_widgets.clear()
+            def handle_edit(from_cmb=False):
+                if not self.editing_widgets: return
+                entry = self.editing_widgets.get('entry'); cmb = self.editing_widgets.get('cmb');
+                if not entry or not cmb: return
+                new_time, just = entry.get().strip(), cmb.get()
+                if not (re.match(r'^\d{2}:\d{2}$', new_time) or new_time in ('', 'N/A', '00:00')):
+                    if new_time != current_time: messagebox.showerror("Erro Formato", "Formato de hora inválido. Use HH:MM.", parent=self.root); on_escape(); return
+                temp_vals = list(self.tree_viewer.item(item_id, 'values')); temp_vals[col_index] = new_time; self.tree_viewer.item(item_id, values=tuple(temp_vals))
+                if edit_key not in self.unsaved_edits: current_row_values = self.tree_viewer.item(item_id, 'values'); self.unsaved_edits[edit_key] = {'E1': current_row_values[3], 'S1': current_row_values[4], 'E2': current_row_values[5], 'S2': current_row_values[6]}
+                self.unsaved_edits[edit_key][column_name] = new_time; self.unsaved_edits[edit_key]['justificativa'] = just; self.update_visual_work_hours(item_id)
+                if from_cmb: on_escape()
+            entry_edit.bind('<Return>', lambda e: handle_edit(from_cmb=True)); entry_edit.bind('<Escape>', on_escape); entry_edit.bind('<FocusOut>', lambda e: on_escape()); justificativa_cmb.bind('<<ComboboxSelected>>', lambda e: handle_edit(from_cmb=True)); justificativa_cmb.bind('<Escape>', on_escape)
 
     def update_visual_work_hours(self, item_id):
-        values = self.tree_viewer.item(item_id, 'values'); matricula = values[0]; data_ptbr = values[2]; data_db = datetime.strptime(data_ptbr, "%d/%m/%Y").strftime("%Y-%m-%d")
-        all_times_raw = [values[3], values[4], values[5], values[6]]; func_info = self.db.get_funcionario_info(matricula); sector = func_info.get('setor', 'N/D'); minutos_totais_liquidos = 0
-        penalidade_total_dia = 0
-        periodos_calculados = []
-        is_incomplete = False # Flag para batida ímpar
+            values = self.tree_viewer.item(item_id, 'values'); matricula = values[0]; data_ptbr = values[2]; data_db = datetime.strptime(data_ptbr, "%d/%m/%Y").strftime("%Y-%m-%d")
+            all_times_raw = [values[3], values[4], values[5], values[6]]; func_info = self.db.get_funcionario_info(matricula); sector = func_info.get('setor', 'N/D'); minutos_totais_liquidos = 0
+            penalidade_total_dia = 0
+            periodos_calculados = []
+            is_incomplete = False # Flag para batida ímpar
 
-        for i in range(0, 4, 2):
-            e_time, s_time = all_times_raw[i], all_times_raw[i+1]
-            if e_time and s_time and e_time not in ('N/A', '00:00', '') and s_time not in ('N/A', '00:00', ''):
-                try:
-                    entrada = datetime.strptime(f"{data_db} {e_time}", "%Y-%m-%d %H:%M");
-                    saida = datetime.strptime(f"{data_db} {s_time}", "%Y-%m-%d %H:%M")
-                    if saida < entrada: saida += timedelta(days=1)
+            for i in range(0, 4, 2):
+                e_time, s_time = all_times_raw[i], all_times_raw[i+1]
+                if e_time and s_time and e_time not in ('N/A', '00:00', '') and s_time not in ('N/A', '00:00', ''):
+                    try:
+                        entrada = datetime.strptime(f"{data_db} {e_time}", "%Y-%m-%d %H:%M");
+                        saida = datetime.strptime(f"{data_db} {s_time}", "%Y-%m-%d %H:%M")
+                        if saida < entrada: saida += timedelta(days=1)
 
-                    turno = "Manhã" if i == 0 else "Tarde"
-                    jornada_inicio = datetime.strptime(f"{data_db} {'07:30' if turno == 'Manhã' else '13:00'}", "%Y-%m-%d %H:%M")
+                        turno = "Manhã" if i == 0 else "Tarde"
+                        jornada_inicio = datetime.strptime(f"{data_db} {'07:30' if turno == 'Manhã' else '13:00'}", "%Y-%m-%d %H:%M")
 
-                    late_min = max(0, (entrada - jornada_inicio).total_seconds() / 60)
-                    deduction_min_periodo = calculate_deduction(late_min, sector)
-                    penalidade_total_dia += deduction_min_periodo
+                        late_min = max(0, (entrada - jornada_inicio).total_seconds() / 60)
+                        deduction_min_periodo = calculate_deduction(late_min, sector)
+                        penalidade_total_dia += deduction_min_periodo
 
-                    inicio_efetivo = jornada_inicio + timedelta(minutes=deduction_min_periodo)
-                    inicio_real_contagem = max(entrada, inicio_efetivo)
-                    liquido_min_periodo = 0
-                    if saida > inicio_real_contagem:
-                        liquido_min_periodo = (saida - inicio_real_contagem).total_seconds() / 60
+                        inicio_efetivo = jornada_inicio + timedelta(minutes=deduction_min_periodo)
+                        inicio_real_contagem = max(entrada, inicio_efetivo)
+                        liquido_min_periodo = 0
+                        if saida > inicio_real_contagem:
+                            liquido_min_periodo = (saida - inicio_real_contagem).total_seconds() / 60
 
-                    minutos_totais_liquidos += liquido_min_periodo
+                        minutos_totais_liquidos += liquido_min_periodo
 
-                    periodos_calculados.append({
-                        "entrada": str(entrada), "saida": str(saida),
-                        "minutos_brutos": format_minutes_to_hms((saida - entrada).total_seconds() / 60),
-                        "deducao_minutos": format_minutes_to_hms(deduction_min_periodo),
-                        "minutos_liquidos": format_minutes_to_hms(liquido_min_periodo)
-                    })
-                except ValueError:
-                    continue
-            elif e_time and not s_time and e_time not in ('N/A', '00:00', ''):
-                try:
-                    is_incomplete = True # Marca como incompleto
-                    entrada = datetime.strptime(f"{data_db} {e_time}", "%Y-%m-%d %H:%M");
-                    
-                    turno = "Manhã" if i == 0 else "Tarde"
-                    jornada_inicio = datetime.strptime(f"{data_db} {'07:30' if turno == 'Manhã' else '13:00'}", "%Y-%m-%d %H:%M")
+                        periodos_calculados.append({
+                            "entrada": str(entrada), "saida": str(saida),
+                            "minutos_brutos": format_minutes_to_hms((saida - entrada).total_seconds() / 60),
+                            "deducao_minutos": format_minutes_to_hms(deduction_min_periodo),
+                            "minutos_liquidos": format_minutes_to_hms(liquido_min_periodo)
+                        })
+                    except ValueError:
+                        continue
+                elif e_time and not s_time and e_time not in ('N/A', '00:00', ''):
+                    try:
+                        is_incomplete = True # Marca como incompleto
+                        entrada = datetime.strptime(f"{data_db} {e_time}", "%Y-%m-%d %H:%M");
+                        
+                        turno = "Manhã" if i == 0 else "Tarde"
+                        jornada_inicio = datetime.strptime(f"{data_db} {'07:30' if turno == 'Manhã' else '13:00'}", "%Y-%m-%d %H:%M")
 
-                    late_min = max(0, (entrada - jornada_inicio).total_seconds() / 60)
-                    deduction_min_periodo = calculate_deduction(late_min, sector)
-                    penalidade_total_dia += deduction_min_periodo
-                    
-                    minutos_totais_liquidos += 0 
-                    
-                    periodos_calculados.append({
-                        "entrada": str(entrada), "saida": None,
-                        "minutos_brutos": "00:00:00",
-                        "deducao_minutos": format_minutes_to_hms(deduction_min_periodo),
-                        "minutos_liquidos": "00:00:00"
-                    })
-                except ValueError:
-                    continue
+                        late_min = max(0, (entrada - jornada_inicio).total_seconds() / 60)
+                        deduction_min_periodo = calculate_deduction(late_min, sector)
+                        penalidade_total_dia += deduction_min_periodo
+                        
+                        minutos_totais_liquidos += 0 
+                        
+                        periodos_calculados.append({
+                            "entrada": str(entrada), "saida": None,
+                            "minutos_brutos": "00:00:00",
+                            "deducao_minutos": format_minutes_to_hms(deduction_min_periodo),
+                            "minutos_liquidos": "00:00:00"
+                        })
+                    except ValueError:
+                        continue
 
-        new_values = list(values);
-        new_values[7] = format_minutes_to_hms(minutos_totais_liquidos)
-        new_values[9] = format_minutes_to_hms(penalidade_total_dia)
-        
-        # Atualiza as tags da linha (remove/adiciona 'incomplete')
-        current_tags = list(self.tree_viewer.item(item_id, 'tags'))
-        if is_incomplete and 'incomplete' not in current_tags:
-            current_tags.append('incomplete')
-        elif not is_incomplete and 'incomplete' in current_tags:
-            current_tags
-# Atualiza as tags da linha (remove/adiciona 'incomplete')
-        current_tags = list(self.tree_viewer.item(item_id, 'tags'))
-        if is_incomplete and 'incomplete' not in current_tags:
-            current_tags.append('incomplete')
-        elif not is_incomplete and 'incomplete' in current_tags:
-            current_tags.remove('incomplete')
+            new_values = list(values);
+            new_values[7] = format_minutes_to_hms(minutos_totais_liquidos)
+            new_values[9] = format_minutes_to_hms(penalidade_total_dia)
             
-        self.tree_viewer.item(item_id, values=tuple(new_values), tags=tuple(current_tags))
+            # --- CORREÇÃO: Bloco duplicado removido ---
+            current_tags = list(self.tree_viewer.item(item_id, 'tags'))
+            if is_incomplete and 'incomplete' not in current_tags:
+                current_tags.append('incomplete')
+            elif not is_incomplete and 'incomplete' in current_tags:
+                current_tags.remove('incomplete')
+                
+            self.tree_viewer.item(item_id, values=tuple(new_values), tags=tuple(current_tags))
 
 
-        edit_key = (matricula, data_db)
-        if edit_key in self.unsaved_edits:
-            # Atualiza os períodos recalculados para serem salvos corretamente
-            self.unsaved_edits[edit_key]['periodos_recalculados'] = periodos_calculados
+            edit_key = (matricula, data_db)
+            if edit_key in self.unsaved_edits:
+                # Atualiza os períodos recalculados para serem salvos corretamente
+                self.unsaved_edits[edit_key]['periodos_recalculados'] = periodos_calculados
 
 
     def process_manual_update_and_save(self, matricula, data_db, all_times_raw, justificativa):
-        func_info = self.db.get_funcionario_info(matricula); sector = func_info.get('setor', 'N/D'); periodos, minutos_totais = [], 0
-        for i in range(0, 4, 2):
-            e_time, s_time = all_times_raw[i], all_times_raw[i+1]
-            
-            # Caso 1: Período completo
-            if e_time and s_time and e_time not in ('N/A', '00:00', '') and s_time not in ('N/A', '00:00', ''):
-                try:
-                    entrada = datetime.strptime(f"{data_db} {e_time}", "%Y-%m-%d %H:%M");
-                    saida = datetime.strptime(f"{data_db} {s_time}", "%Y-%m-%d %H:%M")
-                    if saida < entrada: saida += timedelta(days=1)
+            func_info = self.db.get_funcionario_info(matricula); sector = func_info.get('setor', 'N/D'); periodos, minutos_totais = [], 0
+            for i in range(0, 4, 2):
+                e_time, s_time = all_times_raw[i], all_times_raw[i+1]
+                
+                # Caso 1: Período completo
+                if e_time and s_time and e_time not in ('N/A', '00:00', '') and s_time not in ('N/A', '00:00', ''):
+                    try:
+                        entrada = datetime.strptime(f"{data_db} {e_time}", "%Y-%m-%d %H:%M");
+                        saida = datetime.strptime(f"{data_db} {s_time}", "%Y-%m-%d %H:%M")
+                        if saida < entrada: saida += timedelta(days=1)
 
-                    turno = "Manhã" if i == 0 else "Tarde"
-                    jornada_inicio = datetime.strptime(f"{data_db} {'07:30' if turno == 'Manhã' else '13:00'}", "%Y-%m-%d %H:%M")
+                        turno = "Manhã" if i == 0 else "Tarde"
+                        jornada_inicio = datetime.strptime(f"{data_db} {'07:30' if turno == 'Manhã' else '13:00'}", "%Y-%m-%d %H:%M")
 
-                    late_min = max(0, (entrada - jornada_inicio).total_seconds() / 60)
-                    deduction_min = calculate_deduction(late_min, sector)
+                        late_min = max(0, (entrada - jornada_inicio).total_seconds() / 60)
+                        deduction_min = calculate_deduction(late_min, sector)
 
-                    inicio_efetivo = jornada_inicio + timedelta(minutes=deduction_min)
-                    inicio_real_contagem = max(entrada, inicio_efetivo)
-                    liquido_min = 0
-                    if saida > inicio_real_contagem:
-                        liquido_min = (saida - inicio_real_contagem).total_seconds() / 60
+                        inicio_efetivo = jornada_inicio + timedelta(minutes=deduction_min)
+                        inicio_real_contagem = max(entrada, inicio_efetivo)
+                        liquido_min = 0
+                        if saida > inicio_real_contagem:
+                            liquido_min = (saida - inicio_real_contagem).total_seconds() / 60
 
-                    minutos_totais += liquido_min
-                    periodos.append({
-                        "entrada": str(entrada), "saida": str(saida),
-                        "minutos_brutos": format_minutes_to_hms((saida - entrada).total_seconds() / 60),
-                        "deducao_minutos": format_minutes_to_hms(deduction_min),
-                        "minutos_liquidos": format_minutes_to_hms(liquido_min)
-                    })
-                except ValueError:
-                    self.append_log(f"ERRO ao salvar formato de hora '{e_time}' ou '{s_time}' para {matricula} em {data_db}."); continue
-            
-            # Caso 2: Apenas Entrada
-            elif e_time and not s_time and e_time not in ('N/A', '00:00', ''):
-                try:
-                    entrada = datetime.strptime(f"{data_db} {e_time}", "%Y-%m-%d %H:%M");
-                    
-                    turno = "Manhã" if i == 0 else "Tarde"
-                    jornada_inicio = datetime.strptime(f"{data_db} {'07:30' if turno == 'Manhã' else '13:00'}", "%Y-%m-%d %H:%M")
+                        minutos_totais += liquido_min
+                        periodos.append({
+                            "entrada": str(entrada), "saida": str(saida),
+                            "minutos_brutos": format_minutes_to_hms((saida - entrada).total_seconds() / 60),
+                            "deducao_minutos": format_minutes_to_hms(deduction_min),
+                            "minutos_liquidos": format_minutes_to_hms(liquido_min)
+                        })
+                    except ValueError:
+                        self.append_log(f"ERRO ao salvar formato de hora '{e_time}' ou '{s_time}' para {matricula} em {data_db}."); continue
+                
+                # Caso 2: Apenas Entrada
+                elif e_time and not s_time and e_time not in ('N/A', '00:00', ''):
+                    try:
+                        entrada = datetime.strptime(f"{data_db} {e_time}", "%Y-%m-%d %H:%M");
+                        
+                        turno = "Manhã" if i == 0 else "Tarde"
+                        jornada_inicio = datetime.strptime(f"{data_db} {'07:30' if turno == 'Manhã' else '13:00'}", "%Y-%m-%d %H:%M")
 
-                    late_min = max(0, (entrada - jornada_inicio).total_seconds() / 60)
-                    deduction_min = calculate_deduction(late_min, sector)
+                        late_min = max(0, (entrada - jornada_inicio).total_seconds() / 60)
+                        deduction_min = calculate_deduction(late_min, sector)
 
-                    minutos_totais += 0
-                    periodos.append({
-                        "entrada": str(entrada), "saida": None,
-                        "minutos_brutos": "00:00:00",
-                        "deducao_minutos": format_minutes_to_hms(deduction_min),
-                        "minutos_liquidos": "00:00:00"
-                    })
-                except ValueError:
-                    self.append_log(f"ERRO ao salvar formato de hora '{e_time}' para {matricula} em {data_db}."); continue
+                        minutos_totais += 0
+                        periodos.append({
+                            "entrada": str(entrada), "saida": None,
+                            "minutos_brutos": "00:00:00",
+                            "deducao_minutos": format_minutes_to_hms(deduction_min),
+                            "minutos_liquidos": "00:00:00"
+                        })
+                    except ValueError:
+                        self.append_log(f"ERRO ao salvar formato de hora '{e_time}' para {matricula} em {data_db}."); continue
 
-        self.db.insert_horas_trabalhadas({
-            "matricula": matricula,
-            "data": data_db,
-            "minutos_totais": format_minutes_to_hms(minutos_totais),
-            "periodos": periodos
-        }, justificativa=justificativa)
-        self.append_log(f"Ponto {matricula} {data_db} atualizado. Just: '{justificativa}'.")
+            self.db.insert_horas_trabalhadas({
+                "matricula": matricula,
+                "data": data_db,
+                "minutos_totais": format_minutes_to_hms(minutos_totais),
+                "periodos": periodos
+            }, justificativa=justificativa)
+            self.append_log(f"Ponto {matricula} {data_db} atualizado. Just: '{justificativa}'.")
 
 
     def commit_all_changes(self, from_exit=False):
-        if self.editing_widgets: [w.event_generate('<FocusOut>') for k, w in self.editing_widgets.items() if k == 'entry']
-        if not self.unsaved_edits:
-            if not from_exit:
-                messagebox.showinfo("Salvar", "Nenhuma alteração.")
-            return
-
-        if not from_exit:
-            if not messagebox.askyesno("Confirmar", f"{len(self.unsaved_edits)} dia(s) alterados. Salvar e recalcular?"):
+            if self.editing_widgets: [w.event_generate('<FocusOut>') for k, w in self.editing_widgets.items() if k == 'entry']
+            if not self.unsaved_edits:
+                if not from_exit:
+                    messagebox.showinfo("Salvar", "Nenhuma alteração.")
                 return
 
-        self.append_log(f"Salvando {len(self.unsaved_edits)} alterações..."); affected_employees = set()
-        for (matricula, data_db), edits in self.unsaved_edits.items():
-            affected_employees.add(matricula);
-            justificativa = edits.get('justificativa', 'Ajuste Manual');
-            self.process_manual_update_and_save(matricula, data_db, [edits.get('E1',''), edits.get('S1',''), edits.get('E2',''), edits.get('S2','')], justificativa)
+            if not from_exit:
+                if not messagebox.askyesno("Confirmar", f"{len(self.unsaved_edits)} dia(s) alterados. Salvar e recalcular?"):
+                    return
 
-        self.append_log("Recalculando saldos...");
-        recalc_errors = 0
-        for mat in affected_employees:
-             try:
-                self.db.recalculate_full_balance_for_employee(mat)
-             except Exception as e:
-                self.append_log(f"ERRO ao recalcular saldo para {mat} após salvar edições: {e}")
-                recalc_errors += 1
+            self.append_log(f"Salvando {len(self.unsaved_edits)} alterações..."); affected_employees = set()
+            for (matricula, data_db), edits in self.unsaved_edits.items():
+                affected_employees.add(matricula);
+                justificativa = edits.get('justificativa', 'Ajuste Manual');
+                self.process_manual_update_and_save(matricula, data_db, [edits.get('E1',''), edits.get('S1',''), edits.get('E2',''), edits.get('S2','')], justificativa)
 
-        self.unsaved_edits = {}
+            self.append_log("Recalculando saldos...");
+            recalc_errors = 0
+            for mat in affected_employees:
+                 try:
+                    self.db.recalculate_full_balance_for_employee(mat)
+                 except Exception as e:
+                    self.append_log(f"ERRO ao recalcular saldo para {mat} após salvar edições: {e}")
+                    recalc_errors += 1
 
-        if not from_exit:
-            if recalc_errors == 0:
-                messagebox.showinfo("Sucesso", "Alterações salvas e saldos recalculados.")
-            else:
-                messagebox.showwarning("Atenção", f"Alterações salvas, mas ocorreram {recalc_errors} erro(s) durante o recálculo.\nVerifique o log.")
-            self.load_point_viewer(force_reload=True); self._update_calendar_tags()
+            self.unsaved_edits = {}
+
+            if not from_exit:
+                if recalc_errors == 0:
+                    messagebox.showinfo("Sucesso", "Alterações salvas e saldos recalculados.")
+                else:
+                    messagebox.showwarning("Atenção", f"Alterações salvas, mas ocorreram {recalc_errors} erro(s) durante o recálculo.\nVerifique o log.")
+                self.load_point_viewer(force_reload=True)
+                self._update_calendar_tags()
 
 
 # --- Ponto de Entrada Principal ---
+# (Esta linha NÃO deve ser indentada)
 if __name__ == "__main__":
     root = tk.Tk()
     app = App(root)
