@@ -10,6 +10,13 @@ from tkcalendar import Calendar
 import re
 import sys
 from PIL import Image as PILImage, ImageTk
+import threading
+import requests
+import webbrowser
+from packaging import version
+
+# Use a tag exata que você criou no GitHub (ex: v1.0.0)
+CURRENT_VERSION = "v1.0.0"
 
 # Tenta importar bibliotecas necessárias
 try:
@@ -28,6 +35,13 @@ try:
 except ImportError:
     messagebox.showerror("Biblioteca Faltando", "reportlab: pip install reportlab")
     exit()
+    from PIL import Image as PILImage, ImageTk
+
+    # --- ADICIONE ESTA LINHA ---
+    # Esta é a versão ATUAL do seu .exe.
+    # Você DEVE atualizar este número antes de compilar um NOVO .exe para uma nova release.
+    CURRENT_VERSION = "v1.0.0" 
+    # --- FIM ---
 
 # -------------------------
 # BANCO DE DADOS (SQLite)
@@ -1500,7 +1514,7 @@ class App:
         # Removido self.SYSTEM_START_DATE
         self.root = root
         self.root.state('zoomed')
-        self.root.title("WN Ponto Certo")
+        self.root.title(f"WN Ponto Certo - {CURRENT_VERSION}")
         try:
             self.root.iconbitmap(LOGO_ICON_PATH)
         except Exception as e:
@@ -1614,9 +1628,16 @@ class App:
         ttk.Button(actions_frame, text="Abonar Falta", command=self.on_abone_falta, style='TButton').pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(actions_frame, text="Relatório Detalhado", command=self.on_detailed_report, style='TButton').pack(side=tk.LEFT, padx=(0, 10))
         # --- FIM DA ADIÇÃO ---
+        # ... (outros botões)
         ttk.Button(actions_frame, text="📄 Exportar Log", command=self.on_export_log, style='TButton').pack(side=tk.LEFT, padx=(0, 10))
+        
+        # --- BOTÃO ADICIONADO ---
+        ttk.Button(actions_frame, text="🔄 Verificar Atualizações", command=self.check_for_updates).pack(side=tk.RIGHT, padx=(0, 10))
+        # --- FIM ---
+        
         ttk.Button(actions_frame, text="🚪 Sair", command=self.on_app_close, style='TButton').pack(side=tk.RIGHT)
 
+        log_frame = ttk.LabelFrame(main_frame, text=" Log ", style='TLabelframe')
         log_frame = ttk.LabelFrame(main_frame, text=" Log ", style='TLabelframe')
         log_frame.grid(row=1, column=1, sticky="nsew", pady=5, padx=(5, 0))
         self.log_area = scrolledtext.ScrolledText(log_frame, bg="#112240", fg="#a8b2d1", insertbackground="white", font=("Consolas", 9), relief=tk.FLAT, borderwidth=5)
@@ -4199,7 +4220,7 @@ class App:
                 messagebox.showinfo("Sucesso", f"Espelho de Ponto salvo:\n{filepath}")
 
             except PermissionError:
-                messagebox.showerror("Erro", f"Erro de Permissão.\O arquivo '{filepath}' pode estar aberto. Feche-o e tente novamente.")
+                messagebox.showerror("Erro", fr"Erro de Permissão.\O arquivo '{filepath}' pode estar aberto. Feche-o e tente novamente.")
             except Exception as e:
                 messagebox.showerror("Erro PDF", f"Não foi possível gerar o PDF: {e}")
                 self.append_log(f"ERRO PDF: {e}")
@@ -4427,8 +4448,66 @@ class App:
                 self._update_calendar_tags()
 
 
-# --- Ponto de Entrada Principal ---
-# (Esta linha NÃO deve ser indentada)
+    # --- Ponto de Entrada Principal ---
+    def check_for_updates(self):
+            """Inicia a verificação de atualização em uma thread separada para não travar a UI."""
+            self.append_log("Verificando atualizações...")
+            # Desabilita o botão para evitar cliques duplos (opcional, mas recomendado)
+            # (Você precisaria guardar uma referência ao botão para fazer isso)
+            
+            # Inicia a verificação em background
+            threading.Thread(target=self._run_update_check, daemon=True).start()
+
+    def _run_update_check(self):
+        """Executa a lógica de verificação de atualização (rodando em uma thread)."""
+        # Substitua 'SH1NNxs' e 'projeto_ponto' pelos seus dados do GitHub
+        API_URL = "https://api.github.com/repos/SH1NNxs/projeto_ponto/releases/latest"
+        
+        try:
+            # O 'timeout' é importante para não travar para sempre se não houver internet
+            response = requests.get(API_URL, headers={"Accept": "application/vnd.github.v3+json"}, timeout=5)
+            response.raise_for_status() # Lança um erro se a resposta for 4xx ou 5xx
+            
+            data = response.json()
+            latest_tag = data.get('tag_name')
+            
+            if not latest_tag:
+                self.append_log("Não foi possível encontrar a tag da última versão.")
+                messagebox.showerror("Erro de Atualização", "Não foi possível ler a tag da última versão no GitHub.", parent=self.root)
+                return
+
+            self.append_log(f"Versão atual: {CURRENT_VERSION}. Versão mais recente: {latest_tag}")
+
+            # Compara as versões
+            if version.parse(latest_tag) > version.parse(CURRENT_VERSION):
+                self.append_log(f"Nova versão {latest_tag} encontrada!")
+                
+                # Pega a URL da PÁGINA de release (não o .exe direto)
+                download_page_url = data.get('html_url')
+                
+                if messagebox.askyesno("Nova Versão Encontrada",
+                                       f"Uma nova versão ({latest_tag}) está disponível!\n\n"
+                                       "Você está usando a versão {CURRENT_VERSION}.\n\n"
+                                       "Deseja abrir a página de download agora?",
+                                       parent=self.root):
+                    
+                    self.append_log(f"Abrindo página de download: {download_page_url}")
+                    webbrowser.open_new(download_page_url)
+            else:
+                self.append_log("O sistema já está atualizado.")
+                messagebox.showinfo("Tudo Certo!",
+                                    f"Você já está com a versão mais recente ({CURRENT_VERSION}).",
+                                    parent=self.root)
+
+        except requests.exceptions.Timeout:
+            self.append_log("Erro: A verificação de atualização demorou demais (timeout).")
+            messagebox.showwarning("Erro de Rede", "Não foi possível verificar atualizações.\nVerifique sua conexão com a internet.", parent=self.root)
+        except requests.exceptions.RequestException as e:
+            self.append_log(f"Erro ao verificar atualização: {e}")
+            messagebox.showerror("Erro de Atualização", f"Não foi possível se conectar ao GitHub para verificar atualizações.\n\nDetalhe: {e}", parent=self.root)
+        except Exception as e:
+            self.append_log(f"Erro inesperado na verificação: {e}")
+            messagebox.showerror("Erro", f"Ocorreu um erro inesperado: {e}", parent=self.root)
 if __name__ == "__main__":
     root = tk.Tk()
     app = App(root)

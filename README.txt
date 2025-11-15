@@ -46,7 +46,7 @@ Passo 3: Geracao do Novo .exe
 *******************************************************************************
 *** O COMANDO DE COMPILACAO (OFICIAL) ***
 
-pyinstaller --onefile --windowed --add-data "wn_logo.png;." --add-data "wn_logo.ico;." --icon="wn_logo.ico" --name "WN Ponto Certo" wn_ponto_certo.py
+pyinstaller --onefile --windowed --collect-data certifi --add-data "wn_logo.png;." --add-data "wn_logo.ico;." --icon="wn_logo.ico" --name "WN Ponto Certo" wn_ponto_certo.py
 
 *******************************************************************************
 
