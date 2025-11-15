@@ -348,153 +348,9 @@ class DatabaseManager:
         c = self.conn.cursor()
         start_date_str = start_date.isoformat() if isinstance(start_date, date) else start_date
         end_date_str = end_date.isoformat() if isinstance(end_date, date) else end_date
-        query = "SELECT id, data_punicao, minutos_descontados, motivo FROM punicoes WHERE matricula = ? AND data_punicao BETWEEN ? AND ? AND data_punicao >= ? ORDER BY data_punicao"
+        query = "SELECT data_punicao, minutos_descontados, motivo FROM punicoes WHERE matricula = ? AND data_punicao BETWEEN ? AND ? AND data_punicao >= ? ORDER BY data_punicao"
         c.execute(query, (matricula, start_date_str, end_date_str, SYSTEM_START_DATE))
         return [dict(row) for row in c.fetchall()]
-        
-    def delete_punicao(self, punicao_id):
-        try:
-            with self.conn:
-                c = self.conn.cursor()
-                # 1. Pega os dados ANTES de deletar (para o log)
-                c.execute("SELECT matricula, data_punicao, minutos_descontados, motivo FROM punicoes WHERE id = ?", (punicao_id,))
-                row = c.fetchone()
-                
-                if row:
-                    # 2. Deleta a punição
-                    self.conn.execute("DELETE FROM punicoes WHERE id = ?", (punicao_id,))
-                    
-                    # 3. Loga a remoção (para o Power BI)
-                    minutos_str = format_minutes_to_hms(row['minutos_descontados'] or 0)
-                    log_antigo = f"Punição: {minutos_str} ({row['motivo'] or 'N/D'})"
-                    log_novo = "Punição: Removida"
-                    self.log_edicao(row['matricula'], row['data_punicao'], log_antigo, log_novo, "Remoção de Punição")
-                    
-                    return row['matricula'] # Retorna a matrícula para recalcular
-            return False
-        except Exception as e:
-            print(f"Erro delete punição: {e}")
-            return False
-    
-    def get_extras_paid_in_range(self, matricula, start_date, end_date):
-        c = self.conn.cursor()
-        start_date_str = start_date.isoformat() if isinstance(start_date, date) else start_date
-        end_date_str = end_date.isoformat() if isinstance(end_date, date) else end_date
-
-        query = """
-            SELECT periodos_antigos, periodos_novos
-            FROM log_edicoes
-            WHERE matricula = ?
-              AND data_ponto BETWEEN ? AND ?
-              AND justificativa = 'Pagamento/Dedução Saldo'
-        """
-        c.execute(query, (matricula, start_date_str, end_date_str))
-        logs_pagamento = c.fetchall()
-
-        total_extras_pagos = 0
-        for log in logs_pagamento:
-            try:
-                antigo_str = log['periodos_antigos']
-                novo_str = log['periodos_novos']
-
-                extras_antigo_match = re.search(r'Extras: (\-?\d+)', antigo_str)
-                extras_novo_match = re.search(r'Extras: (\-?\d+)', novo_str)
-
-                if extras_antigo_match and extras_novo_match:
-                    extras_antigo = int(extras_antigo_match.group(1))
-                    extras_novo = int(extras_novo_match.group(1))
-                    total_extras_pagos += (extras_antigo - extras_novo)
-            except Exception as e:
-                print(f"Erro ao parsear log de pagamento para get_extras_paid_in_range: {e}")
-
-        return total_extras_pagos
-
-    def get_payment_logs(self, matricula, start_date, end_date):
-        """Busca apenas logs de 'Pagamento/Dedução Saldo' para a tela de estorno."""
-        c = self.conn.cursor()
-        start_date_str = start_date.isoformat() if isinstance(start_date, date) else start_date
-        end_date_str = end_date.isoformat() if isinstance(end_date, date) else end_date
-
-        query = """
-            SELECT id, data_ponto, periodos_antigos, periodos_novos
-            FROM log_edicoes
-            WHERE matricula = ?
-              AND data_ponto BETWEEN ? AND ?
-              AND justificativa = 'Pagamento/Dedução Saldo'
-            ORDER BY data_ponto DESC, id DESC
-        """
-        c.execute(query, (matricula, start_date_str, end_date_str))
-        return [dict(row) for row in c.fetchall()]
-
-    def reverse_payment(self, log_id):
-        """Reverte um lançamento de pagamento (Estorno)."""
-        try:
-            with self.conn:
-                c = self.conn.cursor()
-                
-                # 1. Pega o log original do pagamento
-                c.execute("SELECT * FROM log_edicoes WHERE id = ? AND justificativa = 'Pagamento/Dedução Saldo'", (log_id,))
-                log_row = c.fetchone()
-
-                if not log_row:
-                    # Verifica se já foi estornado
-                    c.execute("SELECT 1 FROM log_edicoes WHERE id = ? AND justificativa LIKE '[ESTORNADO]%'", (log_id,))
-                    if c.fetchone():
-                        return False, "Este pagamento já foi estornado."
-                    return False, "Log de pagamento não encontrado."
-                
-                matricula = log_row['matricula']
-                antigo_str = log_row['periodos_antigos']
-                novo_str = log_row['periodos_novos']
-
-                # 2. Calcula o que foi pago
-                extras_a_reverter = 0
-                bh_a_reverter = 0
-
-                try:
-                    extras_antigo = int(re.search(r'Extras: (\-?\d+)', antigo_str).group(1))
-                    extras_novo = int(re.search(r'Extras: (\-?\d+)', novo_str).group(1))
-                    extras_a_reverter = extras_antigo - extras_novo
-                except Exception:
-                    pass # Ignora se não houver log de extras
-
-                try:
-                    bh_antigo = parse_hhmm_to_minutes(re.search(r'BH: ([\-\d:]+)', antigo_str).group(1))
-                    bh_novo = parse_hhmm_to_minutes(re.search(r'BH: ([\-\d:]+)', novo_str).group(1))
-                    bh_a_reverter = bh_antigo - bh_novo
-                except Exception:
-                    pass # Ignora se não houver log de BH
-
-                if extras_a_reverter == 0 and bh_a_reverter == 0:
-                    return False, "Nenhum valor a reverter neste log (ambos são zero)."
-
-                # 3. Pega os saldos atuais
-                func_info = self.get_funcionario_info(matricula)
-                bh_atual = func_info.get('banco_horas', 0)
-                extras_atual = func_info.get('extras_disponiveis', 0)
-                
-                # 4. Soma os valores de volta
-                novo_bh = bh_atual + bh_a_reverter
-                novo_extras = extras_atual + extras_a_reverter
-
-                # 5. Atualiza o saldo do funcionário
-                self.conn.execute("UPDATE funcionarios SET banco_horas = ?, extras_disponiveis = ? WHERE matricula = ?",
-                                  (novo_bh, novo_extras, matricula))
-                
-                # 6. Loga o Estorno (para Power BI)
-                log_antigo_reverso = f"BH: {format_minutes_to_hms(bh_atual)}, Extras: {int(extras_atual)}"
-                log_novo_reverso = f"BH: {format_minutes_to_hms(novo_bh)}, Extras: {int(novo_extras)}"
-                self.log_edicao(matricula, date.today().isoformat(), log_antigo_reverso, log_novo_reverso, f"Estorno Pagamento (Ref. Log ID: {log_id})")
-
-                # 7. --- NOVA ETAPA: Atualiza o log original para marcá-lo como estornado ---
-                self.conn.execute("UPDATE log_edicoes SET justificativa = ? WHERE id = ?", 
-                                  (f"[ESTORNADO] Pagamento/Dedução Saldo", log_id))
-
-            return True, matricula # Sucesso
-        
-        except Exception as e:
-            print(f"Erro em reverse_payment: {e}")
-            return False, str(e)
     
     def add_abono(self, matricula, data_abono_str, motivo, minutos_abonados):
         try:
@@ -514,9 +370,9 @@ class DatabaseManager:
                 c.execute("SELECT matricula, data, motivo, minutos_abonados FROM abonos WHERE id = ?", (abono_id,))
                 row = c.fetchone()
                 if row:
-                    minutos_str = format_minutes_to_hms(row['minutos_abonados'] or 0)
+                    minutos_str = format_minutes_to_hms(row.get('minutos_abonados', 0))
                     self.conn.execute("DELETE FROM abonos WHERE id = ?", (abono_id,))
-                    self.log_edicao(row['matricula'], row['data'], f"Abono: {minutos_str} ({row['motivo'] or 'N/D'})", "Abono: Removido", "Remoção de Abono")
+                    self.log_edicao(row['matricula'], row['data'], f"Abono: {minutos_str} ({row['motivo']})", "Abono: Removido", "Remoção de Abono")
                     return row['matricula'] # Retorna a matrícula para recalcular
             return False
         except Exception as e:
@@ -693,16 +549,14 @@ class DatabaseManager:
         cur.execute("SELECT periodos FROM horas_trabalhadas WHERE matricula=? AND data=?", (dados.get("matricula"), dados.get("data")))
         old_data = cur.fetchone()
         periodos_antigos = old_data['periodos'] if old_data else "[]"
-        
-        # Usa 'with' para garantir que o INSERT e o LOG estejam na mesma transação
-        with self.conn:
-            self.conn.execute("INSERT OR REPLACE INTO horas_trabalhadas (matricula, data, minutos_totais, periodos) VALUES (?, ?, ?, ?)", (dados.get("matricula"), dados.get("data"), dados.get("minutos_totais"), json.dumps(dados.get("periodos"), default=str)))
-            if justificativa != "Importação Automática" or old_data:
-                self.log_edicao(dados.get("matricula"), dados.get("data"), periodos_antigos, json.dumps(dados.get("periodos"), default=str), justificativa)
-    
+        self.conn.execute("INSERT OR REPLACE INTO horas_trabalhadas (matricula, data, minutos_totais, periodos) VALUES (?, ?, ?, ?)", (dados.get("matricula"), dados.get("data"), dados.get("minutos_totais"), json.dumps(dados.get("periodos"), default=str)))
+        self.conn.commit()
+        if justificativa != "Importação Automática" or old_data:
+            self.log_edicao(dados.get("matricula"), dados.get("data"), periodos_antigos, json.dumps(dados.get("periodos"), default=str), justificativa)
+
     def log_edicao(self, matricula, data_ponto, periodos_antigos, periodos_novos, justificativa):
-        # Esta função NÃO DEVE commitar. Ela participa da transação do chamador.
         self.conn.execute("INSERT INTO log_edicoes (matricula, data_ponto, periodos_antigos, periodos_novos, justificativa) VALUES (?, ?, ?, ?, ?)", (matricula, data_ponto, periodos_antigos, periodos_novos, justificativa))
+        self.conn.commit()
 
     def get_funcionario_info(self, matricula):
         c = self.conn.cursor()
@@ -729,11 +583,9 @@ class DatabaseManager:
             info_antes = self.get_funcionario_info(matricula)
             periodo_antigo = f"Fichado: {info_antes.get('fichado', 0)}, Setor: {info_antes.get('setor', 'N/D')}"
             periodo_novo = f"Fichado: {fichado}, Setor: {setor}"
-            
-            with self.conn: # Garante que o UPDATE e o LOG estejam na mesma transação
-                self.conn.execute("UPDATE funcionarios SET fichado = ?, setor = ? WHERE matricula = ?", (fichado, setor, matricula))
-                self.log_edicao(matricula, datetime.now().strftime("%Y-%m-%d"), periodo_antigo, periodo_novo, "Alteração Cadastral")
-            
+            self.conn.execute("UPDATE funcionarios SET fichado = ?, setor = ? WHERE matricula = ?", (fichado, setor, matricula))
+            self.conn.commit()
+            self.log_edicao(matricula, datetime.now().strftime("%Y-%m-%d"), periodo_antigo, periodo_novo, "Alteração Cadastral")
             return True
         except Exception as e:
             print(f"Erro update func: {e}")
@@ -933,7 +785,6 @@ class DatabaseManager:
                     'Carga_Horaria': carga_horaria_dia_str, 
                     'Total_Desconto': total_desconto_penalidade_str,
                     'BH_Anterior': format_minutes_to_hms(simulacao_do_dia['bh_anterior']),
-                    'Extras_Anterior': str(int(simulacao_do_dia['extras_anterior'])), # <-- LINHA ADICIONADA
                     'BH_Saldo': format_minutes_to_hms(simulacao_do_dia['bh_saldo']),
                     'Extras_Disp': str(int(simulacao_do_dia['extras_saldo'])),
                     'is_incomplete': is_incomplete_day
@@ -984,14 +835,14 @@ class DatabaseManager:
             novo_saldo_bh = saldo_bh_antes - minutos_a_deduzir_bh
             novo_saldo_extras = saldo_extras_antes - unidades_a_deduzir_extras
 
-            with self.conn: # Garante que o UPDATE e o LOG estejam na mesma transação
-                self.conn.execute("UPDATE funcionarios SET banco_horas = ?, extras_disponiveis = ? WHERE matricula = ?", (novo_saldo_bh, novo_saldo_extras, matricula))
+            self.conn.execute("UPDATE funcionarios SET banco_horas = ?, extras_disponiveis = ? WHERE matricula = ?", (novo_saldo_bh, novo_saldo_extras, matricula))
+            self.conn.commit()
 
-                data_hoje = datetime.now().strftime("%Y-%m-%d")
-                justificativa = "Pagamento/Dedução Saldo"
-                periodo_antigo = f"BH: {format_minutes_to_hms(saldo_bh_antes)}, Extras: {int(saldo_extras_antes)}"
-                periodo_novo = f"BH: {format_minutes_to_hms(novo_saldo_bh)}, Extras: {int(novo_saldo_extras)}"
-                self.log_edicao(matricula, data_hoje, periodo_antigo, periodo_novo, justificativa)
+            data_hoje = datetime.now().strftime("%Y-%m-%d")
+            justificativa = "Pagamento/Dedução Saldo"
+            periodo_antigo = f"BH: {format_minutes_to_hms(saldo_bh_antes)}, Extras: {int(saldo_extras_antes)}"
+            periodo_novo = f"BH: {format_minutes_to_hms(novo_saldo_bh)}, Extras: {int(novo_saldo_extras)}"
+            self.log_edicao(matricula, data_hoje, periodo_antigo, periodo_novo, justificativa)
 
             return True
         except Exception as e:
@@ -1605,9 +1456,6 @@ class App:
         ttk.Button(actions_frame, text="✏️ Editar Func", command=self.on_edit_employee, style='TButton').pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(actions_frame, text="📅 Feriados", command=self.on_manage_holidays, style='TButton').pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(actions_frame, text="💰 Pagar Saldo", command=self.on_extra_payment, style='TButton').pack(side=tk.LEFT, padx=(0, 10))
-        # --- BOTÃO ADICIONADO ---
-        ttk.Button(actions_frame, text="↩️ Desfazer Pagamento", command=self.on_reverse_payment, style='Delete.TButton').pack(side=tk.LEFT, padx=(0, 10))
-        # --- FIM ---
         ttk.Button(actions_frame, text=" Punição", command=self.on_add_punishment, style='TButton').pack(side=tk.LEFT, padx=(0, 10))
         # --- ADICIONE ESTAS 3 LINHAS ---
         ttk.Button(actions_frame, text="Saldos Iniciais", command=self.on_edit_initial_balance, style='TButton').pack(side=tk.LEFT, padx=(0, 10))
@@ -1790,100 +1638,31 @@ class App:
         btn_salvar.config(command=save_changes); refresh_employee_list()
 
     def on_add_punishment(self):
-        win = tk.Toplevel(self.root); win.title("Adicionar/Remover Punição")
+        win = tk.Toplevel(self.root); win.title("Adicionar Punição")
         win.configure(bg=self.BG_COLOR);
-        win.state('zoomed'); win.minsize(1024, 768) # Aumenta o tamanho
+        win.state('zoomed'); win.minsize(600, 700)
         win.resizable(False, False); win.transient(self.root); win.grab_set()
 
-        main_frame = tk.Frame(win, bg=self.BG_COLOR, padx=20, pady=20)
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        main_frame = tk.Frame(win, bg=self.BG_COLOR)
+        main_frame.pack(expand=True)
 
-        # --- Frame do Formulário (Esquerda) ---
-        form_frame = ttk.LabelFrame(main_frame, text=" Adicionar Punição ", style='TLabelframe')
-        form_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+        form_frame = tk.Frame(main_frame, bg=self.BG_COLOR, padx=20, pady=20)
+        form_frame.pack(fill=tk.BOTH, expand=True)
 
-        tk.Label(form_frame, text="1. Func:", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(10, 5), padx=10)
-        nomes = [f"{f['matricula']} - {f['nome']}" for f in self.db.get_all_funcionarios()]
-        cmb_func = ttk.Combobox(form_frame, values=nomes, state="readonly", width=40)
-        cmb_func.pack(anchor="w", pady=(0, 15), padx=10)
+        ttk.Button(form_frame, text="Sair", style='Delete.TButton', command=win.destroy, width=10).pack(anchor='e', pady=(0,10))
+
+        tk.Label(form_frame, text="1. Func:", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5)); nomes = [f"{f['matricula']} - {f['nome']}" for f in self.db.get_all_funcionarios()]; cmb_func = ttk.Combobox(form_frame, values=nomes, state="readonly", width=50); cmb_func.pack(anchor="w", pady=(0, 15))
 
         try:
             min_date = datetime.strptime(SYSTEM_START_DATE, "%Y-%m-%d").date()
         except:
             min_date = None
 
-        tk.Label(form_frame, text="2. Data:", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5), padx=10)
-        cal_punicao = Calendar(form_frame, selectmode="day", date_pattern="yyyy-mm-dd", locale='pt_BR',
-                               background="#008080", foreground="white", headersbackground="#008080",
-                               mindate=min_date)
-        cal_punicao.pack(anchor="w", pady=(0, 15), padx=10)
+        tk.Label(form_frame, text="2. Data:", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5)); cal_punicao = Calendar(form_frame, selectmode="day", date_pattern="yyyy-mm-dd", locale='pt_BR', background="#008080", foreground="white", headersbackground="#008080", mindate=min_date); cal_punicao.pack(anchor="w", pady=(0, 15))
+        # Removida adição à lista dinâmica
         
-        tk.Label(form_frame, text="3. Tempo (HH:MM):", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5), padx=10)
-        entry_tempo = ttk.Entry(form_frame, width=15)
-        entry_tempo.pack(anchor="w", padx=10, pady=(0, 15))
-
-        tk.Label(form_frame, text="4. Motivo:", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5), padx=10)
-        entry_motivo = ttk.Entry(form_frame, width=30)
-        entry_motivo.pack(anchor="w", fill="x", pady=(0, 20), padx=10)
-
-        btn_salvar_punicao = ttk.Button(form_frame, text="✅ Registrar Punição", style='TButton')
-        btn_salvar_punicao.pack(pady=10, padx=10, fill=tk.X)
-
-        btn_delete = ttk.Button(form_frame, text="🗑️ Remover Punição Selecionada", style='Delete.TButton')
-        btn_delete.pack(pady=(15, 5), padx=10, fill=tk.X)
-
-        ttk.Button(form_frame, text="Sair", style='Delete.TButton', command=win.destroy).pack(side=tk.BOTTOM, pady=10, padx=10, fill=tk.X)
-
-        # --- Frame da Lista (Direita) ---
-        list_frame = ttk.LabelFrame(main_frame, text=" Punições Registradas (no período) ", style='TLabelframe')
-        list_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        list_frame.grid_rowconfigure(0, weight=1)
-        list_frame.grid_columnconfigure(0, weight=1)
-
-        tree_columns = ("Data", "Tempo", "Motivo")
-        tree_punicoes = ttk.Treeview(list_frame, columns=tree_columns, show="headings", selectmode="browse")
-
-        v_scroll = ttk.Scrollbar(list_frame, orient="vertical", command=tree_punicoes.yview)
-        tree_punicoes.configure(yscrollcommand=v_scroll.set)
-        tree_punicoes.grid(row=0, column=0, sticky='nsew')
-        v_scroll.grid(row=0, column=1, sticky='ns')
-
-        tree_punicoes.heading("Data", text="Data")
-        tree_punicoes.column("Data", width=100, anchor=tk.CENTER)
-        tree_punicoes.heading("Tempo", text="Tempo")
-        tree_punicoes.column("Tempo", width=100, anchor=tk.CENTER)
-        tree_punicoes.heading("Motivo", text="Motivo")
-        tree_punicoes.column("Motivo", width=250, anchor=tk.W, stretch=tk.YES)
-
-        # --- Funções de Lógica da Janela ---
-
-        def refresh_punicao_list():
-            [tree_punicoes.delete(i) for i in tree_punicoes.get_children()]
-            selection = cmb_func.get()
-            if not selection:
-                return
-            
-            matricula = selection.split(" - ")[0]
-            # Usa as datas da tela principal (como a tela de abono faz)
-            start_date = self.selected_start_date
-            end_date = self.selected_end_date
-            
-            if not start_date or not end_date:
-                start_date = datetime.strptime(SYSTEM_START_DATE, "%Y-%m-%d").date()
-                end_date = date.today()
-
-            punishments = self.db.get_punishments_in_range(matricula, start_date, end_date)
-            for i, p in enumerate(punishments):
-                try:
-                    data_fmt = datetime.strptime(p['data_punicao'], '%Y-%m-%d').strftime('%d/%m/%Y')
-                except:
-                    data_fmt = p['data_punicao']
-                
-                minutos_hms = format_minutes_to_hms(p.get('minutos_descontados', 0))
-                values = (data_fmt, minutos_hms, p['motivo'])
-                iid = f"punicao_{p['id']}" # Armazena o ID aqui
-                tag = 'evenrow' if i % 2 == 0 else 'oddrow'
-                tree_punicoes.insert("", "end", values=values, iid=iid, tags=(tag,))
+        tk.Label(form_frame, text="3. Tempo (HH:MM):", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5)); entry_tempo = ttk.Entry(form_frame, width=15); entry_tempo.pack(anchor="w", pady=(0, 15))
+        tk.Label(form_frame, text="4. Motivo:", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5)); entry_motivo = ttk.Entry(form_frame, width=50); entry_motivo.pack(anchor="w", fill="x", pady=(0, 20))
 
         def save_punishment():
              selection = cmb_func.get();
@@ -1909,60 +1688,18 @@ class App:
                  if self.db.add_punicao(matricula, data_str, minutos_descontados, motivo):
                      messagebox.showinfo("Sucesso", "Punição registrada! O saldo será recalculado.", parent=win)
                      self.append_log(f"PUNIÇÃO REGISTRADA: {matricula} - {data_str} - {format_minutes_to_hms(minutos_descontados)} - {motivo}")
-                     entry_tempo.delete(0, 'end'); entry_motivo.delete(0, 'end')
+                     cmb_func.set(''); entry_tempo.delete(0, 'end'); entry_motivo.delete(0, 'end')
                      try:
                          self.db.recalculate_full_balance_for_employee(matricula)
                          self.append_log(f"Recalculando saldo para {matricula} após registro de punição.")
                      except Exception as e:
                          self.append_log(f"ERRO ao recalcular saldo para {matricula} após punição: {e}")
                          messagebox.showerror("Erro Recálculo", f"Erro ao recalcular saldo para {matricula}:\n{e}", parent=win)
-                     
-                     refresh_punicao_list() # Atualiza a lista na tela
                      self.load_point_viewer(force_reload=True);
                      self._update_calendar_tags()
                  else: messagebox.showerror("Erro", "Não foi possível salvar a punição.", parent=win)
-        
-        def delete_selected_punishment():
-            selected_iid = tree_punicoes.selection()
-            if not selected_iid:
-                messagebox.showerror("Erro", "Nenhuma punição selecionada na lista.", parent=win)
-                return
 
-            iid = selected_iid[0]
-            if not iid.startswith('punicao_'):
-                return
-                
-            item_data = tree_punicoes.item(iid, 'values')
-            desc = f"{item_data[0]} ({item_data[1]}) - {item_data[2]}"
-            punicao_id = iid.split('_')[1]
-
-            if not messagebox.askyesno("Confirmar Remoção", f"Tem certeza que deseja remover a punição:\n{desc}\n\nO saldo será recalculado.", parent=win):
-                return
-
-            matricula_afetada = self.db.delete_punicao(punicao_id) # Chama a nova função
-            if matricula_afetada:
-                self.append_log(f"PUNIÇÃO REMOVIDA: {desc}. Recalculando...")
-                try:
-                    self.db.recalculate_full_balance_for_employee(matricula_afetada)
-                    self.append_log(f"Recálculo de {matricula_afetada} concluído.")
-                    messagebox.showinfo("Sucesso", "Punição removida e saldo recalculado!", parent=win)
-                    refresh_punicao_list() # Atualiza a lista
-                    self.load_point_viewer(force_reload=True) # Atualiza a tela principal
-                except Exception as e:
-                    messagebox.showerror("Erro", f"Erro ao recalcular: {e}", parent=win)
-                    self.append_log(f"ERRO ao recalcular {matricula_afetada} após remover punição: {e}")
-            else:
-                messagebox.showerror("Erro", "Não foi possível remover a punição.", parent=win)
-
-        # --- Conectar Funções aos Botões ---
-        cmb_func.bind("<<ComboboxSelected>>", lambda e: refresh_punicao_list())
-        btn_salvar_punicao.config(command=save_punishment)
-        btn_delete.config(command=delete_selected_punishment)
-        
-        # Carrega a lista se um funcionário já estiver selecionado na tela principal
-        if self.cmb_filter_func.get() and self.cmb_filter_func.get() != "Todos":
-            cmb_func.set(self.cmb_filter_func.get())
-            refresh_punicao_list()
+        btn_salvar_punicao = ttk.Button(form_frame, text="✅ Registrar Punição", style='TButton', command=save_punishment); btn_salvar_punicao.pack()
 
     def on_manage_holidays(self):
         win = tk.Toplevel(self.root)
@@ -2809,48 +2546,33 @@ class App:
 
         ttk.Button(form_frame, text="Sair", style='Delete.TButton', command=win.destroy, width=10).pack(anchor='e', pady=(0,10))
 
-        tk.Label(form_frame, text="1. Func:", bg="#0a192f", fg="#ccd6f6", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5)); 
-        nomes = [f"{f['matricula']} - {f['nome']}" for f in self.db.get_all_funcionarios()]; 
-        cmb_func = ttk.Combobox(form_frame, values=nomes, state="readonly", width=50); 
-        cmb_func.pack(anchor="w", pady=(0, 20)); 
-        tk.Label(form_frame, text="2. Período:", bg="#0a192f", fg="#ccd6f6", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5))
+        tk.Label(form_frame, text="1. Func:", bg="#0a192f", fg="#ccd6f6", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5)); nomes = [f"{f['matricula']} - {f['nome']}" for f in self.db.get_all_funcionarios()]; cmb_func = ttk.Combobox(form_frame, values=nomes, state="readonly", width=50); cmb_func.pack(anchor="w", pady=(0, 20)); tk.Label(form_frame, text="2. Período:", bg="#0a192f", fg="#ccd6f6", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5))
 
-        # --- MODIFICAÇÃO: Substituindo os dois calendários ---
-        # Removido 'period_frame', 'cal_start', 'cal_end'
-        date_picker = DateRangePicker(form_frame, self.BG_COLOR, self.style_colors_dict)
-        date_picker.pack(pady=10, padx=10)
+        try:
+            min_date = datetime.strptime(SYSTEM_START_DATE, "%Y-%m-%d").date()
+        except:
+            min_date = None
+
+        period_frame = tk.Frame(form_frame, bg="#0a1f2f"); period_frame.pack(anchor="w"); tk.Label(period_frame, text="De:", bg="#0a192f", fg="#ccd6f6").pack(side=tk.LEFT, padx=(0,5)); cal_start = Calendar(period_frame, selectmode="day", date_pattern="yyyy-mm-dd", locale='pt_BR', background="#008080", foreground="white", headersbackground="#008080", mindate=min_date); cal_start.pack(side=tk.LEFT, padx=(0, 10))
+        tk.Label(period_frame, text="Até:", bg="#0a192f", fg="#ccd6f6").pack(side=tk.LEFT, padx=(0,5)); cal_end = Calendar(period_frame, selectmode="day", date_pattern="yyyy-mm-dd", locale='pt_BR', background="#008080", foreground="white", headersbackground="#008080", mindate=min_date); cal_end.pack(side=tk.LEFT); btn_export = ttk.Button(form_frame, text="Gerar PDF", style='TButton'); btn_export.pack(pady=20)
         
-        # Pré-seleciona as datas da tela principal
-        if self.selected_start_date:
-            date_picker.cal.selection_set(self.selected_start_date)
-            date_picker._on_calendar_click()
-        if self.selected_end_date:
-            date_picker.cal.selection_set(self.selected_end_date)
-            date_picker._on_calendar_click()
-        # --- FIM DA MODIFICAÇÃO ---
-        
-        btn_export = ttk.Button(form_frame, text="Gerar PDF", style='TButton'); 
-        btn_export.pack(pady=20)
-        
+        # Removida adição à lista dinâmica
+
+
+        if min_date:
+            cal_start.selection_set(max(date.today().replace(day=1), min_date))
+        else:
+            cal_start.selection_set(date.today().replace(day=1))
+
         def generate_pdf():
             selection = cmb_func.get();
-            if not selection: 
-                messagebox.showerror("Erro", "Funcionário não selecionado.", parent=win); return
-            
-            matricula = selection.split(" - ")[0]; 
-            nome_func = " ".join(selection.split(" - ")[1:])
-            
-            # --- MODIFICAÇÃO: Lendo do DateRangePicker ---
-            start_dt, end_dt = date_picker.get_dates()
-            # --- FIM DA MODIFICAÇÃO ---
+            if not selection: messagebox.showerror("Erro", "Funcionário não selecionado.", parent=win); return
+            matricula = selection.split(" - ")[0]; nome_func = " ".join(selection.split(" - ")[1:])
+            start_date_str = cal_start.get_date(); end_date_str = cal_end.get_date()
 
             try:
-                # --- MODIFICAÇÃO: Validação das novas datas ---
-                if not start_dt or not end_dt:
-                    messagebox.showerror("Erro", "Selecione um período válido (Início e Fim).", parent=win)
-                    return
-                # --- FIM DA MODIFICAÇÃO ---
-                
+                start_dt = datetime.strptime(start_date_str, '%Y-%m-%d').date()
+                end_dt = datetime.strptime(end_date_str, '%Y-%m-%d').date()
                 if end_dt < start_dt:
                     messagebox.showerror("Erro", "Data final não pode ser anterior à data inicial.", parent=win)
                     return
@@ -2861,88 +2583,18 @@ class App:
                 messagebox.showerror("Erro", f"Datas inválidas: {e}", parent=win)
                 return
 
-            logs = self.db.get_logs_for_period(matricula, start_dt, end_dt)
-            if not logs: 
-                messagebox.showinfo("Aviso", "Nenhum log encontrado.", parent=win); return
+            logs = self.db.get_logs_for_period(matricula, start_date_str, end_date_str)
+            if not logs: messagebox.showinfo("Aviso", "Nenhum log encontrado.", parent=win); return
 
-            filepath = filedialog.asksaveasfilename(
-                defaultextension=".pdf", 
-                filetypes=[("PDF files", "*.pdf")], 
-                title="Salvar Relatório", 
-                initialfile=f"Log_{nome_func.replace(' ','_')}_{start_dt.isoformat()}_a_{end_dt.isoformat()}.pdf" # Nome do arquivo atualizado
-            )
-            if not filepath: 
-                return
-            
+            filepath = filedialog.asksaveasfilename(defaultextension=".pdf", filetypes=[("PDF files", "*.pdf")], title="Salvar Relatório", initialfile=f"Log_{nome_func.replace(' ','_')}_{start_date_str}_a_{end_date_str}.pdf")
+            if not filepath: return
             try:
-                doc = SimpleDocTemplate(filepath, pagesize=landscape(A4), rightMargin=2*cm, leftMargin=2*cm, topMargin=2*cm, bottomMargin=2*cm); 
-                styles = getSampleStyleSheet(); 
-                story = []
-                
-                # --- MODIFICAÇÃO: Estilos para quebra de linha ---
-                style_table_header = ParagraphStyle(
-                    name='TableHeader',
-                    parent=styles['Normal'],
-                    fontName='Helvetica-Bold',
-                    textColor=colors.whitesmoke,
-                    alignment=TA_CENTER
-                )
-                style_cell_left = ParagraphStyle(
-                    name='TableCellLeft',
-                    parent=styles['Normal'],
-                    fontSize=8,
-                    textColor=colors.black,
-                    alignment=TA_LEFT
-                )
-                style_cell_center = ParagraphStyle(
-                    name='TableCellCenter',
-                    parent=styles['Normal'],
-                    fontSize=8,
-                    textColor=colors.black,
-                    alignment=TA_CENTER
-                )
-                # --- FIM DA MODIFICAÇÃO ---
-                
-                story.append(Paragraph("Relatório Log Alterações", styles['h1'])); 
-                story.append(Spacer(1, 0.5*cm)); 
-                story.append(Paragraph(f"<b>Funcionário:</b> {nome_func}", styles['Normal'])); 
-                story.append(Paragraph(f"<b>Matrícula:</b> {matricula}", styles['Normal'])); 
-                story.append(Paragraph(f"<b>Período:</b> {start_dt.strftime('%d/%m/%Y')} a {end_dt.strftime('%d/%m/%Y')}", styles['Normal'])); 
-                story.append(Spacer(1, 1*cm))
-                
-                # --- MODIFICAÇÃO: Usando Paragraphs ---
-                col_headers = ['Data Ponto', 'Data Edição', 'Valor Antigo', 'Valor Novo', 'Justificativa']
-                table_data = [[Paragraph(h, style_table_header) for h in col_headers]]
-                
-                for log in logs:
-                    row = [
-                        Paragraph(datetime.strptime(log['data_ponto'], '%Y-%m-%d').strftime('%d/%m/%Y'), style_cell_center), 
-                        Paragraph(datetime.strptime(log['data_edicao'], '%Y-%m-%d %H:%M:%S').strftime('%d/%m/%Y %H:%M'), style_cell_center), 
-                        Paragraph(log['periodos_antigos'], style_cell_left), 
-                        Paragraph(log['periodos_novos'], style_cell_left), 
-                        Paragraph(log['justificativa'], style_cell_center)
-                    ]
-                    table_data.append(row)
-                # --- FIM DA MODIFICAÇÃO ---
-                
-                t = Table(table_data, colWidths=[2.5*cm, 3.0*cm, 8.0*cm, 8.0*cm, 4.0*cm]); 
-                t.setStyle(TableStyle([
-                    ('BACKGROUND', (0,0), (-1,0), colors.teal), 
-                    ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke), 
-                    ('ALIGN', (0,0), (-1,-1), 'CENTER'), 
-                    ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'), 
-                    ('BOTTOMPADDING', (0,0), (-1,0), 12), 
-                    ('BACKGROUND', (0,1), (-1,-1), colors.beige), 
-                    ('GRID', (0,0), (-1,-1), 1, colors.black),
-                    ('VALIGN', (0,0), (-1,-1), 'TOP') # Alinha ao topo para melhor leitura
-                ]))
-                story.append(t); 
-                doc.build(story); 
-                messagebox.showinfo("Sucesso", f"Relatório salvo:\n{filepath}", parent=win); 
-                win.destroy()
-            except Exception as e: 
-                messagebox.showerror("Erro PDF", f"Erro: {e}", parent=win)
-        
+                doc = SimpleDocTemplate(filepath, pagesize=landscape(A4), rightMargin=2*cm, leftMargin=2*cm, topMargin=2*cm, bottomMargin=2*cm); styles = getSampleStyleSheet(); story = []
+                story.append(Paragraph("Relatório Log Alterações", styles['h1'])); story.append(Spacer(1, 0.5*cm)); story.append(Paragraph(f"<b>Funcionário:</b> {nome_func}", styles['Normal'])); story.append(Paragraph(f"<b>Matrícula:</b> {matricula}", styles['Normal'])); story.append(Paragraph(f"<b>Período:</b> {start_dt.strftime('%d/%m/%Y')} a {end_dt.strftime('%d/%m/%Y')}", styles['Normal'])); story.append(Spacer(1, 1*cm))
+                table_data = [['Data Ponto', 'Data Edição', 'Valor Antigo', 'Valor Novo', 'Justificativa']]; [table_data.append([datetime.strptime(log['data_ponto'], '%Y-%m-%d').strftime('%d/%m/%Y'), datetime.strptime(log['data_edicao'], '%Y-%m-%d %H:%M:%S').strftime('%d/%m/%Y %H:%M'), log['periodos_antigos'], log['periodos_novos'], log['justificativa']]) for log in logs]
+                t = Table(table_data, colWidths=[2.5*cm, 3.0*cm, 8.0*cm, 8.0*cm, 4.0*cm]); t.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,0), colors.teal), ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke), ('ALIGN', (0,0), (-1,-1), 'CENTER'), ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'), ('BOTTOMPADDING', (0,0), (-1,0), 12), ('BACKGROUND', (0,1), (-1,-1), colors.beige), ('GRID', (0,0), (-1,-1), 1, colors.black)]))
+                story.append(t); doc.build(story); messagebox.showinfo("Sucesso", f"Relatório salvo:\n{filepath}", parent=win); win.destroy()
+            except Exception as e: messagebox.showerror("Erro PDF", f"Erro: {e}", parent=win)
         btn_export.config(command=generate_pdf)
 
     # --- INÍCIO DAS NOVAS FUNÇÕES ---
@@ -3455,157 +3107,6 @@ class App:
                 self.append_log(f"ERRO PDF: {e}")
 
         btn_generate.config(command=generate_report)
-    
-    def on_reverse_payment(self):
-        win = tk.Toplevel(self.root); win.title("Desfazer (Estornar) Pagamento")
-        win.configure(bg=self.BG_COLOR); win.state('zoomed'); win.minsize(1024, 768)
-        win.resizable(False, False); win.transient(self.root); win.grab_set()
-
-        main_frame = tk.Frame(win, bg=self.BG_COLOR, padx=20, pady=20)
-        main_frame.pack(fill=tk.BOTH, expand=True)
-
-        # --- Frame do Formulário (Esquerda) ---
-        form_frame = ttk.LabelFrame(main_frame, text=" Filtros ", style='TLabelframe')
-        form_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
-
-        tk.Label(form_frame, text="1. Func:", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(10, 5), padx=10)
-        nomes = [f"{f['matricula']} - {f['nome']}" for f in self.db.get_all_funcionarios()]
-        cmb_func = ttk.Combobox(form_frame, values=nomes, state="readonly", width=40)
-        cmb_func.pack(anchor="w", pady=(0, 15), padx=10)
-
-        tk.Label(form_frame, text="2. Período do Log:", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5), padx=10)
-        
-        date_picker = DateRangePicker(form_frame, self.BG_COLOR, self.style_colors_dict)
-        date_picker.pack(pady=10, padx=10)
-        
-        # --- MODIFICAÇÃO: Definindo um período padrão sensato (Mês Atual) ---
-        try:
-            min_date_system = datetime.strptime(SYSTEM_START_DATE, "%Y-%m-%d").date()
-        except:
-            min_date_system = date.today()
-
-        today = date.today()
-        start_of_month = today.replace(day=1)
-        
-        # O início é o começo do mês ou o início do sistema (o que for mais recente)
-        default_start_date = max(start_of_month, min_date_system)
-        default_end_date = today
-
-        # Define as datas internas diretamente
-        date_picker.cal.selection_set(default_start_date)
-        date_picker.selected_start_date = default_start_date
-        date_picker.lbl_start.config(text=default_start_date.strftime("%d/%m/%Y"))
-        
-        date_picker.cal.selection_set(default_end_date)
-        date_picker.selected_end_date = default_end_date
-        date_picker.lbl_end.config(text=default_end_date.strftime("%d/%m/%Y"))
-        
-        date_picker.selecting_start = True
-        date_picker._update_calendar_tags()
-        # --- FIM DA MODIFICAÇÃO ---
-
-        btn_refresh = ttk.Button(form_frame, text="Atualizar Lista", style='TButton')
-        btn_refresh.pack(pady=(10, 5), padx=10, fill=tk.X)
-
-        btn_delete = ttk.Button(form_frame, text="↩️ Desfazer Pagamento Selecionado", style='Delete.TButton')
-        btn_delete.pack(pady=(5, 5), padx=10, fill=tk.X)
-
-        ttk.Button(form_frame, text="Sair", style='Delete.TButton', command=win.destroy).pack(side=tk.BOTTOM, pady=10, padx=10, fill=tk.X)
-
-        # --- Frame da Lista (Direita) ---
-        list_frame = ttk.LabelFrame(main_frame, text=" Pagamentos Registrados (no período) ", style='TLabelframe')
-        list_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        list_frame.grid_rowconfigure(0, weight=1)
-        list_frame.grid_columnconfigure(0, weight=1)
-
-        tree_columns = ("Data", "Valor Antigo", "Valor Novo")
-        tree_logs = ttk.Treeview(list_frame, columns=tree_columns, show="headings", selectmode="browse")
-
-        v_scroll = ttk.Scrollbar(list_frame, orient="vertical", command=tree_logs.yview)
-        tree_logs.configure(yscrollcommand=v_scroll.set)
-        tree_logs.grid(row=0, column=0, sticky='nsew')
-        v_scroll.grid(row=0, column=1, sticky='ns')
-
-        tree_logs.heading("Data", text="Data Pagamento")
-        tree_logs.column("Data", width=100, anchor=tk.CENTER)
-        tree_logs.heading("Valor Antigo", text="Saldos Antigos")
-        tree_logs.column("Valor Antigo", width=200, anchor=tk.W)
-        tree_logs.heading("Valor Novo", text="Saldos Novos")
-        tree_logs.column("Valor Novo", width=200, anchor=tk.W, stretch=tk.YES)
-
-        # --- Funções de Lógica da Janela ---
-
-        def refresh_payment_logs():
-            [tree_logs.delete(i) for i in tree_logs.get_children()]
-            selection = cmb_func.get()
-            if not selection:
-                return
-            
-            matricula = selection.split(" - ")[0]
-            start_date, end_date = date_picker.get_dates()
-            
-            if not start_date or not end_date:
-                messagebox.showwarning("Aviso", "Selecione um período de início e fim.", parent=win)
-                return
-
-            payment_logs = self.db.get_payment_logs(matricula, start_date, end_date)
-            
-            for i, log in enumerate(payment_logs):
-                try:
-                    data_fmt = datetime.strptime(log['data_ponto'], '%Y-%m-%d').strftime('%d/%m/%Y')
-                except:
-                    data_fmt = log['data_ponto']
-                
-                values = (data_fmt, log['periodos_antigos'], log['periodos_novos'])
-                iid = f"log_{log['id']}" # Armazena o ID do log
-                tag = 'evenrow' if i % 2 == 0 else 'oddrow'
-                tree_logs.insert("", "end", values=values, iid=iid, tags=(tag,))
-
-        def execute_reversal():
-            selected_iid = tree_logs.selection()
-            if not selected_iid:
-                messagebox.showerror("Erro", "Nenhum log de pagamento selecionado na lista.", parent=win)
-                return
-
-            iid = selected_iid[0]
-            if not iid.startswith('log_'):
-                return
-                
-            item_data = tree_logs.item(iid, 'values')
-            desc = f"Data: {item_data[0]}\nDe: {item_data[1]}\nPara: {item_data[2]}"
-            log_id = iid.split('_')[1]
-
-            if not messagebox.askyesno("Confirmar Estorno", f"Tem certeza que deseja ESTORNAR (desfazer) este pagamento?\n\n{desc}\n\nO saldo do funcionário será recalculado.", parent=win):
-                return
-
-            success, message = self.db.reverse_payment(log_id)
-            
-            if success:
-                matricula_afetada = message
-                self.append_log(f"ESTORNO REALIZADO: Log {log_id}. Recalculando {matricula_afetada}...")
-                try:
-                    self.db.recalculate_full_balance_for_employee(matricula_afetada)
-                    self.append_log(f"Recálculo de {matricula_afetada} concluído.")
-                    messagebox.showinfo("Sucesso", "Pagamento estornado e saldo recalculado!", parent=win)
-                    refresh_payment_logs() # Atualiza a lista
-                    self.load_point_viewer(force_reload=True) # Atualiza a tela principal
-                except Exception as e:
-                    messagebox.showerror("Erro", f"Erro ao recalcular: {e}", parent=win)
-                    self.append_log(f"ERRO ao recalcular {matricula_afetada} após estorno: {e}")
-            else:
-                messagebox.showerror("Erro", f"Não foi possível estornar o pagamento:\n{message}", parent=win)
-                self.append_log(f"ERRO ao estornar log {log_id}: {message}")
-
-        # --- Conectar Funções ---
-        cmb_func.bind("<<ComboboxSelected>>", lambda e: refresh_payment_logs())
-        date_picker.cal.bind("<<CalendarSelected>>", date_picker._on_calendar_click)
-        btn_refresh.config(command=refresh_payment_logs)
-        btn_delete.config(command=execute_reversal)
-        
-        # Carrega a lista da tela principal se houver um funcionário
-        if self.cmb_filter_func.get() and self.cmb_filter_func.get() != "Todos":
-            cmb_func.set(self.cmb_filter_func.get())
-            refresh_payment_logs() # Agora deve funcionar na carga inicial
 
     def on_recalculate_and_refresh(self):
         """
@@ -3932,65 +3433,17 @@ class App:
                 messagebox.showerror("Erro", "Selecione um período válido (Data Início e Fim).")
                 return
 
-            if not selected_func_str or selected_func_str == "Todos":
-                messagebox.showerror("Erro", "Selecione um funcionário (não 'Todos') para gerar um espelho de ponto.")
+            if not selected_func_str:
+                messagebox.showerror("Erro", "Selecione um funcionário.")
                 return
 
-            target_matricula = selected_func_str.split(" - ")[0]
-            nome_func = " ".join(selected_func_str.split(" - ")[1:])
-
-            # --- Lógica de Cálculo (sem alteração) ---
-            try:
-                panorama_data = self.db.get_point_panorama(start_date, end_date, target_matricula)
-                if not panorama_data:
-                    messagebox.showinfo("Aviso", "Não há dados para exportar no panorama.")
-                    return
-            except Exception as e:
-                messagebox.showerror("Erro", f"Não foi possível buscar os dados do panorama: {e}")
+            data_rows = self.tree_viewer.get_children("")
+            if not data_rows:
+                messagebox.showinfo("Aviso", "Não há dados para exportar na visão atual.")
                 return
 
-            total_trabalhado_min = 0
-            total_exigido_min = 0
-            func_info_calc = self.db.get_funcionario_info(target_matricula)
-            is_fichado_calc = func_info_calc.get('fichado', 0) == 1
-            setor_calc = func_info_calc.get('setor', 'N/D')
-            
-            current_date_iter = start_date
-            while current_date_iter <= end_date:
-                data_str = current_date_iter.isoformat()
-                expected_minutes = 0
-                weekday = current_date_iter.weekday()
-                
-                if weekday == 6: # 1. Domingo
-                    expected_minutes = 0
-                else:
-                    is_holiday_today = self.db.is_holiday(data_str)
-                    if is_fichado_calc and is_holiday_today:
-                        expected_minutes = 0
-                    else:
-                        if weekday < 5: # Seg-Sex
-                            expected_minutes = MINUTOS_JORNADA_SEG_SEX # 480
-                        elif weekday == 5: # Sab
-                            expected_minutes = MINUTOS_JORNADA_SABADO # 240
-                
-                total_exigido_min += expected_minutes
-                current_date_iter += timedelta(days=1)
-            
-            for item in panorama_data:
-                total_trabalhado_min += parse_hhmm_to_minutes(item.get('Carga_Horaria', '00:00:00'))
-                
-            primeiro_dia = panorama_data[0]
-            saldo_bh_inicio_semana = parse_hhmm_to_minutes(primeiro_dia.get('BH_Anterior', '00:00:00'))
-            saldo_extras_inicio_semana = int(primeiro_dia.get('Extras_Anterior', '0'))
-            
-            saldo_bh_fim_semana_str = self.lbl_saldo_bh_total.cget('text')
-            saldo_extras_fim_semana_str = self.lbl_saldo_extras_total.cget('text')
-            saldo_bh_fim_semana_min = parse_hhmm_to_minutes(saldo_bh_fim_semana_str)
-            saldo_extras_fim_semana_int = int(saldo_extras_fim_semana_str) if saldo_extras_fim_semana_str.isdigit() else 0
-            
-            total_extras_pagas_periodo = self.db.get_extras_paid_in_range(target_matricula, start_date, end_date)
-            extras_geradas_periodo = saldo_extras_fim_semana_int - saldo_extras_inicio_semana + total_extras_pagas_periodo
-            # --- Fim da Lógica de Cálculo ---
+            target_matricula = selected_func_str.split(" - ")[0] if selected_func_str != "Todos" else "Todos"
+            nome_func = " ".join(selected_func_str.split(" - ")[1:]) if selected_func_str != "Todos" else "Todos_Funcionarios"
 
             filepath = filedialog.asksaveasfilename(
                 defaultextension=".pdf",
@@ -4001,205 +3454,178 @@ class App:
             if not filepath:
                 return
 
+            # --- NOVA LÓGICA: DIAS DA SEMANA --- (AGORA INDENTADO)
             dias_semana = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"]
+            # --- FIM ---
 
-            try:
-                doc = SimpleDocTemplate(filepath, pagesize=landscape(A4), rightMargin=1.5*cm, leftMargin=1.5*cm, topMargin=1.0*cm, bottomMargin=1.0*cm)
+            try: # (AGORA INDENTADO)
+                doc = SimpleDocTemplate(filepath, pagesize=landscape(A4), rightMargin=1.5*cm, leftMargin=1.5*cm, topMargin=1.5*cm, bottomMargin=1.5*cm)
                 styles = getSampleStyleSheet()
                 story = []
 
-                # ... (Definição de estilos) ...
                 style_title = styles['h1']
-                style_title.alignment = TA_LEFT
+                style_title.alignment = TA_CENTER
                 style_title.textColor = colors.teal
+
                 style_header = styles['h2']
                 style_header.fontSize = 10
                 style_header.alignment = TA_LEFT
+
                 style_body = styles['Normal']
                 style_body.fontSize = 8
+
                 style_table_header = styles['Normal']
                 style_table_header.fontSize = 8
                 style_table_header.fontName = 'Helvetica-Bold'
                 style_table_header.alignment = TA_CENTER
+
                 style_table_body = styles['Normal']
                 style_table_body.fontSize = 7
                 style_table_body.alignment = TA_CENTER
-                style_table_body.textColor = colors.black
+                # --- MUDANÇA DE COR ---
+                style_table_body.textColor = colors.black # Melhor para impressão
+                
                 style_table_body_incomplete = styles['Normal']
                 style_table_body_incomplete.fontSize = 7
                 style_table_body_incomplete.alignment = TA_CENTER
                 style_table_body_incomplete.textColor = colors.black
-                # ... (Fim dos estilos) ...
 
-                # --- Layout do Cabeçalho ---
-                header_data = []
-                logo_cell = Paragraph("Espelho de Ponto", style_title)
+
+                style_nome = TableStyle([('ALIGN', (0,0), (0,0), 'LEFT'),
+                                         ('ALIGN', (1,0), (1,0), 'RIGHT')])
+
                 if LOGO_PATH.exists():
-                    try:
-                        logo_img = Image(LOGO_PATH, width=3*cm, height=3*cm, hAlign='LEFT')
-                        logo_cell = logo_img
-                    except Exception as e:
-                        print(f"Erro ao carregar logo: {e}")
+                    story.append(Image(LOGO_PATH, width=3*cm, height=3*cm, hAlign='CENTER'))
+                    story.append(Spacer(1, 0.2*cm))
 
-                title_cell = Paragraph("Espelho de Ponto", style_title)
-                if LOGO_PATH.exists():
-                     title_cell.style.alignment = TA_RIGHT
-                else:
-                     title_cell.style.alignment = TA_CENTER
-                
-                header_data.append([logo_cell, title_cell])
-                
-                header_table = Table(header_data, colWidths=[10*cm, 15.5*cm])
-                header_table.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'TOP')]))
-                story.append(header_table)
-                story.append(Spacer(1, 0.3*cm))
-                # --- Fim do Cabeçalho ---
+                story.append(Paragraph("Espelho de Ponto", style_title))
+                story.append(Spacer(1, 1*cm))
 
-                # --- Agrupar dados do funcionário ---
-                fichado_str = self.lbl_fichado_status.cget('text')
-                setor_str = self.lbl_setor_status.cget('text')
-                story.append(Paragraph(f"<b>Funcionário:</b> {nome_func} (Mat. {target_matricula})", styles['Normal']))
                 story.append(Paragraph(f"<b>Período:</b> {start_date.strftime('%d/%m/%Y')} a {end_date.strftime('%d/%m/%Y')}", styles['Normal']))
-                story.append(Paragraph(f"<b>Fichado:</b> {fichado_str}   |   <b>Setor:</b> {setor_str}", styles['Normal']))
-                story.append(Spacer(1, 0.2*cm))
-                # --- Fim dos dados ---
-                
-                # --- Saldo Início da Semana Centralizado ---
-                style_saldo_inicio = ParagraphStyle(name='SaldoInicio', parent=styles['Normal'], alignment=TA_CENTER)
-                story.append(Paragraph(f"<b>Saldo Início do Período (BH):</b> {format_minutes_to_hms(saldo_bh_inicio_semana)}", style_saldo_inicio))
-                story.append(Spacer(1, 0.2*cm))
-                # --- FIM ---
 
-                # --- Tabela de Pontos (sem alteração) ---
-                col_headers = ["Dia", "Mat.", "Nome", "Data", "E1", "S1", "E2", "S2", "Carga", "Punição", "Desconto"]
-                table_data = [[Paragraph(h, style_table_header) for h in col_headers]]
-                col_widths = [2.2*cm, 1.8*cm, 5.5*cm, 2.5*cm, 1.8*cm, 1.8*cm, 1.8*cm, 1.8*cm, 2.5*cm, 2.5*cm, 2.5*cm]
+                if target_matricula != "Todos":
+                    story.append(Paragraph(f"<b>Funcionário:</b> {nome_func} (Mat. {target_matricula})", styles['Normal']))
+                    story.append(Spacer(1, 0.5*cm))
 
-                for item in panorama_data:
-                    values = (
-                        item['Matricula'], item['Nome'], 
-                        datetime.strptime(item['Data'], '%Y-%m-%d').strftime('%d/%m/%Y'),
-                        item['E1'], item['S1'], item['E2'], item['S2'],
-                        item['Carga_Horaria'],
-                        format_minutes_to_hms(self.db.get_total_punishment_minutes_for_day(item['Matricula'], item['Data'])),
-                        item['Total_Desconto']
-                    )
-                    tags = ['incomplete'] if item.get('is_incomplete', False) else []
-                    cell_style = style_table_body_incomplete if 'incomplete' in tags else style_table_body
-                    try:
-                        data_dt = datetime.strptime(values[2], '%d/%m/%Y').date()
-                        dia_semana_str = dias_semana[data_dt.weekday()]
-                    except: dia_semana_str = "---"
-                    row_data = [
-                        Paragraph(dia_semana_str, cell_style),
-                        Paragraph(values[0], cell_style), Paragraph(values[1], cell_style),
-                        Paragraph(values[2], cell_style), Paragraph(values[3], cell_style),
-                        Paragraph(values[4], cell_style), Paragraph(values[5], cell_style),
-                        Paragraph(values[6], cell_style), Paragraph(values[7], cell_style),
-                        Paragraph(values[8], cell_style), Paragraph(values[9], cell_style),
+                    last_bh_saldo = self.lbl_saldo_bh_total.cget('text')
+                    last_extras = self.lbl_saldo_extras_total.cget('text')
+
+                    saldo_data = [
+                        [Paragraph(f"<b>BH Saldo Final ({end_date.strftime('%d/%m')}):</b> {last_bh_saldo}", style_header),
+                         Paragraph(f"<b>Extras ({end_date.strftime('%d/%m')}):</b> {last_extras}", style_header),
+                         Paragraph(f"<b>Fichado:</b> {self.lbl_fichado_status.cget('text')}", style_header),
+                         Paragraph(f"<b>Setor:</b> {self.lbl_setor_status.cget('text')}", style_header)]
                     ]
-                    table_data.append(row_data)
+                    saldo_table = Table(saldo_data, colWidths=[6*cm, 6*cm, 6*cm, 8*cm])
+                    saldo_table.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'MIDDLE')]))
+                    story.append(saldo_table)
 
-                t = Table(table_data, colWidths=col_widths)
-                style_commands = [
-                    ('BACKGROUND', (0,0), (-1,0), colors.teal),
-                    ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
-                    ('GRID', (0,0), (-1,-1), 1, colors.black),
-                    ('BOX', (0,0), (-1,-1), 1, colors.black),
-                    ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-                ]
-                for i in range(1, len(table_data)):
-                    color = colors.lightgrey if i % 2 == 0 else colors.whitesmoke
-                    style_commands.append(('BACKGROUND', (0,i), (-1,i), color))
-                style_commands.append(('ALIGN', (1,1), (1,-1), 'LEFT'))
-                style_commands.append(('ALIGN', (2,1), (2,-1), 'LEFT'))
-                t.setStyle(TableStyle(style_commands))
-                story.append(t)
-                story.append(Spacer(1, 0.3*cm))
-                # --- Fim Tabela de Pontos ---
+                    # --- NOVA LÓGICA: CÁLCULO DE SAÍDA PARA ZERAR BH ---
+                    try:
+                        func_info = self.db.get_funcionario_info(target_matricula)
+                        is_fichado = func_info.get('fichado', 0) == 1
+                        remaining_bh = func_info.get('banco_horas', 0)
 
-                # --- MODIFICAÇÃO: Detalhamento do Período ---
-                style_h2_center = ParagraphStyle(name='h2Center', parent=styles['h2'], alignment=TA_CENTER)
-                story.append(Paragraph("Detalhamento do Período", style_h2_center))
-                
-                style_detalhe_label = ParagraphStyle(name='DetalheLabel', parent=styles['Normal'], fontName='Helvetica-Bold')
-                style_detalhe_valor = ParagraphStyle(name='DetalheValor', parent=styles['Normal'], alignment=TA_CENTER)
-                
-                bh_final_p = Paragraph(saldo_bh_fim_semana_str, style_detalhe_valor)
-                if saldo_bh_fim_semana_min < 0:
-                    bh_final_p.style.textColor = colors.red
-                else:
-                    bh_final_p.style.textColor = colors.blue
-                
-                detalhamento_data = [
-                    # 1. ORDEM TROCADA
-                    [Paragraph('Carga Horária Exigida:', style_detalhe_label), Paragraph(format_minutes_to_hms(total_exigido_min), style_detalhe_valor)],
-                    [Paragraph('Carga Horária Trabalhada:', style_detalhe_label), Paragraph(format_minutes_to_hms(total_trabalhado_min), style_detalhe_valor)],
-                    [Paragraph('Extras Disponível(s):', style_detalhe_label), Paragraph(f"{total_extras_pagas_periodo} un.", style_detalhe_valor)],
-                    [Paragraph('<b>Saldo Final (BH):</b>', style_detalhe_label), bh_final_p],
-                    # 2. LINHA REMOVIDA
-                    # [Paragraph('<b>Extras Disponíveis:</b>', style_detalhe_label), Paragraph(f"{saldo_extras_fim_semana_int} un.", style_detalhe_valor)],
-                ]
+                        # Base date is the report's end date
+                        base_date = end_date
+                        next_business_day = self.find_next_business_day(base_date, is_fichado)
+                        target_exit_time = self.calculate_bh_zero_exit(remaining_bh, next_business_day)
 
-                # --- Lógica do Sábado (com destaque laranja) ---
-                saturday_row_added = False
-                try:
-                    func_info = self.db.get_funcionario_info(target_matricula)
-                    is_fichado = func_info.get('fichado', 0) == 1
-                    remaining_bh = func_info.get('banco_horas', 0)
-                    base_date = end_date
-                    next_business_day = self.find_next_business_day(base_date, is_fichado)
+                        # --- MODIFICAÇÃO: Criar estilo com fonte maior ---
+                        # Crie um novo estilo para a informação adicional
+                        style_info_adicional = ParagraphStyle(
+                            name='InfoAdicional',
+                            parent=styles['Normal'],  # Baseado no estilo Normal
+                            fontSize=12,  # Aumenta o tamanho da fonte (padrão é 10pt)
+                            textColor=colors.black  # Garante que é preto
+                        )
 
-                    if next_business_day.weekday() == 5:
-                        saturday_row_added = True
-                        is_holiday_saturday = self.db.is_holiday(next_business_day.isoformat())
+                        info_text = (f"<b>Informação Adicional:</b> Para zerar o saldo de BH, a saída no próximo dia útil "
+                                     f"(<b>{next_business_day.strftime('%d/%m/%Y')}</b>) deverá ser às <b>{target_exit_time}</b>.")
+                        story.append(Spacer(1, 0.25*cm))
+                        story.append(Paragraph(info_text, style_info_adicional))  # Use o novo estilo
+                    except Exception as e:
+                        print(f"Erro ao calcular saída para zerar BH (Espelho): {e}")
+                        story.append(Paragraph("<i>Não foi possível calcular o horário para zerar o BH.</i>", styles['Italic']))
+            # --- FIM DA NOVA LÓGICA ---
+
+                    story.append(Spacer(1, 1*cm))
+
+                    # --- COLUNA E LARGURA ATUALIZADAS ---
+                    col_headers = ["Dia", "Mat.", "Nome", "Data", "E1", "S1", "E2", "S2", "Carga", "Punição", "Desconto"]
+                    table_data = [[Paragraph(h, style_table_header) for h in col_headers]]
+
+                    col_widths = [2.2*cm, 1.8*cm, 5.5*cm, 2.5*cm, 1.8*cm, 1.8*cm, 1.8*cm, 1.8*cm, 2.5*cm, 2.5*cm, 2.5*cm]
+                    # --- FIM DA ATUALIZAÇÃO ---
+
+                    for item_id in data_rows:
+                        values = self.tree_viewer.item(item_id, 'values')
+                        tags = self.tree_viewer.item(item_id, 'tags')
                         
-                        if is_holiday_saturday:
-                            holiday_info = self.db.get_holidays_in_range(next_business_day, next_business_day)
-                            holiday_name = holiday_info[0].get('descricao', 'Feriado') if holiday_info else 'Feriado'
-                            detalhamento_data.append([
-                                Paragraph('Horário de Saída no Sábado:', style_detalhe_label), 
-                                Paragraph(f"{holiday_name}", style_detalhe_valor)
-                            ])
-                        else:
-                            target_exit_time = self.calculate_bh_zero_exit(remaining_bh, next_business_day)
-                            detalhamento_data.append([
-                                Paragraph('Horário de Saída no Sábado:', style_detalhe_label), 
-                                Paragraph(f"{target_exit_time}", style_detalhe_valor)
-                            ])
-                
-                except Exception as e:
-                    print(f"Erro ao calcular saída Sábado (Espelho): {e}")
-                
-                t_detalhes = Table(detalhamento_data, colWidths=[8*cm, 4*cm])
-                
-                style_commands_detalhes = [
-                    ('GRID', (0,0), (-1,-1), 1, colors.grey),
-                    ('BACKGROUND', (0,0), (0,-1), colors.lightgrey),
-                    ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-                ]
-                
-                if saturday_row_added:
-                    style_commands_detalhes.append(
-                        ('BACKGROUND', (0,-1), (-1,-1), colors.navajowhite) # Cor Laranja Claro
-                    )
-                
-                t_detalhes.setStyle(TableStyle(style_commands_detalhes))
-                story.append(t_detalhes)
-                story.append(Spacer(1, 0.3*cm))
-                # --- FIM DA MODIFICAÇÃO ---
+                        cell_style = style_table_body_incomplete if 'incomplete' in tags else style_table_body
 
-                # Assinatura
-                story.append(Spacer(1, 0.3*cm))
-                story.append(Paragraph("________________________________________", styles['Normal']))
-                story.append(Paragraph(nome_func, styles['Normal']))
-                story.append(Paragraph(f"Data: ____/____/{datetime.now().year}", styles['Normal']))
+                        # --- LÓGICA PARA PEGAR O DIA DA SEMANA ---
+                        try:
+                            data_dt = datetime.strptime(values[2], '%d/%m/%Y').date()
+                            dia_semana_str = dias_semana[data_dt.weekday()]
+                        except:
+                            dia_semana_str = "---"
+                        # --- FIM ---
 
-                doc.build(story)
-                messagebox.showinfo("Sucesso", f"Espelho de Ponto salvo:\n{filepath}")
+                        # --- LINHA DE DADOS ATUALIZADA ---
+                        row_data = [
+                            Paragraph(dia_semana_str, cell_style), # <-- NOVA CÉLULA
+                            Paragraph(values[0], cell_style),
+                            Paragraph(values[1], cell_style),
+                            Paragraph(values[2], cell_style),
+                            Paragraph(values[3], cell_style),
+                            Paragraph(values[4], cell_style),
+                            Paragraph(values[5], cell_style),
+                            Paragraph(values[6], cell_style),
+                            Paragraph(values[7], cell_style),
+                            Paragraph(values[8], cell_style),
+                            Paragraph(values[9], cell_style),
+                        ]
+                        # --- FIM ---
+                        table_data.append(row_data)
+
+                    t = Table(table_data, colWidths=col_widths)
+                    
+                    # --- INÍCIO DA CORREÇÃO ---
+                    # 1. Criar a lista de comandos de estilo
+                    style_commands = [
+                        ('BACKGROUND', (0,0), (-1,0), colors.teal),
+                        ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+                        ('GRID', (0,0), (-1,-1), 1, colors.black),
+                        ('BOX', (0,0), (-1,-1), 1, colors.black),
+                        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                    ]
+
+                    # 2. Adicionar os comandos de cores alternadas
+                    for i in range(1, len(table_data)):
+                        color = colors.lightgrey if i % 2 == 0 else colors.whitesmoke
+                        style_commands.append(('BACKGROUND', (0,i), (-1,i), color))
+                    
+                    # 3. Adicionar os comandos de alinhamento
+                    style_commands.append(('ALIGN', (1,1), (1,-1), 'LEFT')) # Coluna "Mat."
+                    style_commands.append(('ALIGN', (2,1), (2,-1), 'LEFT')) # Coluna "Nome"
+                    
+                    # 4. Aplicar o TableStyle COM TODOS os comandos
+                    t.setStyle(TableStyle(style_commands))
+                    # --- FIM DA CORREÇÃO ---
+                    
+                    story.append(t)
+
+                    story.append(Spacer(1, 2.5*cm))
+                    story.append(Paragraph("________________________________________", styles['Normal']))
+                    story.append(Paragraph(nome_func, styles['Normal']))
+                    story.append(Paragraph(f"Data: ____/____/{datetime.now().year}", styles['Normal']))
+
+                    doc.build(story)
+                    messagebox.showinfo("Sucesso", f"Espelho de Ponto salvo:\n{filepath}")
 
             except PermissionError:
-                messagebox.showerror("Erro", f"Erro de Permissão.\O arquivo '{filepath}' pode estar aberto. Feche-o e tente novamente.")
+                messagebox.showerror("Erro", f"Erro de Permissão.\nO arquivo '{filepath}' pode estar aberto. Feche-o e tente novamente.")
             except Exception as e:
                 messagebox.showerror("Erro PDF", f"Não foi possível gerar o PDF: {e}")
                 self.append_log(f"ERRO PDF: {e}")
