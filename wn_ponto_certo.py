@@ -18,7 +18,7 @@ import subprocess
 import tempfile
 
 # Use a tag exata que você criou no GitHub (ex: v1.0.0)
-CURRENT_VERSION = "v1.2.0"
+CURRENT_VERSION = "v1.2.2"
 
 # Tenta importar bibliotecas necessárias
 try:
@@ -42,7 +42,7 @@ except ImportError:
     # --- ADICIONE ESTA LINHA ---
     # Esta é a versão ATUAL do seu .exe.
     # Você DEVE atualizar este número antes de compilar um NOVO .exe para uma nova release.
-    CURRENT_VERSION = "v1.2.0" 
+    CURRENT_VERSION = "v1.2.2" 
     # --- FIM ---
 
 # -------------------------
@@ -4504,8 +4504,8 @@ class App:
                 asset_url = None
                 exe_name = None
                 for asset in data.get('assets', []):
-                    # Procura pelo nome do .exe principal
-                    if asset.get('name', '').lower() == "WN Ponto Certo.exe".lower():
+                    # Procura pelo nome do .exe principal (sem espaços)
+                    if asset.get('name', '').lower() == "WN-Ponto-Certo.exe".lower():
                         asset_url = asset.get('browser_download_url')
                         exe_name = asset.get('name')
                         break
