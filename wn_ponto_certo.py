@@ -18,7 +18,7 @@ import subprocess
 import tempfile
 
 # Use a tag exata que você criou no GitHub (ex: v1.0.0)
-CURRENT_VERSION = "v1.2.2"
+CURRENT_VERSION = "v1.2.3"
 
 # Tenta importar bibliotecas necessárias
 try:
@@ -42,7 +42,7 @@ except ImportError:
     # --- ADICIONE ESTA LINHA ---
     # Esta é a versão ATUAL do seu .exe.
     # Você DEVE atualizar este número antes de compilar um NOVO .exe para uma nova release.
-    CURRENT_VERSION = "v1.2.2" 
+    CURRENT_VERSION = "v1.2.3" 
     # --- FIM ---
 
 # -------------------------

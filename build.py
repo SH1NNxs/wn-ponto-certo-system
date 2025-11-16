@@ -5,7 +5,7 @@ import sys
 
 # --- Configurações ---
 SCRIPT_PRINCIPAL = "wn_ponto_certo.py"
-NOME_DO_EXE = "WN Ponto Certo"
+NOME_DO_EXE = "WN-Ponto-Certo"
 ICONE = "wn_logo.ico"
 RECURSOS = [
     ("wn_logo.png", "."),
