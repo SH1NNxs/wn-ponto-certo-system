@@ -4460,8 +4460,8 @@ class App:
 
     def _run_update_check(self):
         """Executa a lógica de verificação de atualização (rodando em uma thread)."""
-        # Substitua 'SH1NNxs' e 'projeto_ponto' pelos seus dados do GitHub
-        API_URL = "https://api.github.com/repos/SH1NNxs/projeto_ponto/releases/latest"
+        # Aponta para o novo repositório PÚBLICO de lançamentos
+        API_URL = "https://api.github.com/repos/SH1NNxs/projeto_ponto-releases/releases/latest"
         
         try:
             # O 'timeout' é importante para não travar para sempre se não houver internet
