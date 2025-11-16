@@ -14,9 +14,11 @@ import threading
 import requests
 import webbrowser
 from packaging import version
+import subprocess
+import tempfile
 
 # Use a tag exata que você criou no GitHub (ex: v1.0.0)
-CURRENT_VERSION = "v1.1.0"
+CURRENT_VERSION = "v1.2.0"
 
 # Tenta importar bibliotecas necessárias
 try:
@@ -40,7 +42,7 @@ except ImportError:
     # --- ADICIONE ESTA LINHA ---
     # Esta é a versão ATUAL do seu .exe.
     # Você DEVE atualizar este número antes de compilar um NOVO .exe para uma nova release.
-    CURRENT_VERSION = "v1.1.0" 
+    CURRENT_VERSION = "v1.2.0" 
     # --- FIM ---
 
 # -------------------------
@@ -1613,31 +1615,46 @@ class App:
         app_title = tk.Label(header_frame, text="WN Ponto Certo", font=("Segoe UI", 20, "bold"), fg="white", bg="#0a192f")
         app_title.pack(side=tk.LEFT)
 
-        actions_frame = tk.Frame(top_frame, bg="#0a192f")
-        actions_frame.pack(fill=tk.X, pady=(10,0))
-        ttk.Button(actions_frame, text="📂 Importar", command=self.on_import, style='TButton').pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Button(actions_frame, text="✏️ Editar Func", command=self.on_edit_employee, style='TButton').pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Button(actions_frame, text="📅 Feriados", command=self.on_manage_holidays, style='TButton').pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Button(actions_frame, text="💰 Pagar Saldo", command=self.on_extra_payment, style='TButton').pack(side=tk.LEFT, padx=(0, 10))
-        # --- BOTÃO ADICIONADO ---
-        ttk.Button(actions_frame, text="↩️ Desfazer Pagamento", command=self.on_reverse_payment, style='Delete.TButton').pack(side=tk.LEFT, padx=(0, 10))
-        # --- FIM ---
-        ttk.Button(actions_frame, text=" Punição", command=self.on_add_punishment, style='TButton').pack(side=tk.LEFT, padx=(0, 10))
-        # --- ADICIONE ESTAS 3 LINHAS ---
-        ttk.Button(actions_frame, text="Saldos Iniciais", command=self.on_edit_initial_balance, style='TButton').pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Button(actions_frame, text="Abonar Falta", command=self.on_abone_falta, style='TButton').pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Button(actions_frame, text="Relatório Detalhado", command=self.on_detailed_report, style='TButton').pack(side=tk.LEFT, padx=(0, 10))
-        # --- FIM DA ADIÇÃO ---
-        # ... (outros botões)
-        ttk.Button(actions_frame, text="📄 Exportar Log", command=self.on_export_log, style='TButton').pack(side=tk.LEFT, padx=(0, 10))
-        
-        # --- BOTÃO ADICIONADO ---
-        ttk.Button(actions_frame, text="🔄 Verificar Atualizações", command=self.check_for_updates).pack(side=tk.RIGHT, padx=(0, 10))
-        # --- FIM ---
-        
-        ttk.Button(actions_frame, text="🚪 Sair", command=self.on_app_close, style='TButton').pack(side=tk.RIGHT)
+# --- MODIFICAÇÃO: Frame de Ações dividido em duas linhas ---
+        actions_frame_container = tk.Frame(top_frame, bg="#0a192f")
+        actions_frame_container.pack(fill=tk.X, pady=(10,0))
 
-        log_frame = ttk.LabelFrame(main_frame, text=" Log ", style='TLabelframe')
+        # --- Botões da Direita (Sair, Atualizar) ---
+        # Criamos um frame separado para os botões da direita
+        right_buttons_frame = tk.Frame(actions_frame_container, bg="#0a192f")
+        right_buttons_frame.pack(side=tk.RIGHT, anchor='n', padx=(10, 0)) # 'n' para alinhar ao topo
+        
+        ttk.Button(right_buttons_frame, text="🔄 Verificar Atualizações", command=self.check_for_updates).pack(side=tk.TOP, fill=tk.X, pady=(0,5))
+        ttk.Button(right_buttons_frame, text="🚪 Sair", command=self.on_app_close, style='TButton').pack(side=tk.TOP, fill=tk.X)
+
+        # --- Botões da Esquerda (Duas fileiras) ---
+        # Este frame vai conter as duas fileiras de botões
+        left_buttons_frame = tk.Frame(actions_frame_container, bg="#0a192f")
+        left_buttons_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # Fileira 1
+        actions_frame_row1 = tk.Frame(left_buttons_frame, bg="#0a192f")
+        actions_frame_row1.pack(fill=tk.X)
+        
+        ttk.Button(actions_frame_row1, text="📂 Importar", command=self.on_import, style='TButton').pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(actions_frame_row1, text="✏️ Editar Func", command=self.on_edit_employee, style='TButton').pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(actions_frame_row1, text="📅 Feriados", command=self.on_manage_holidays, style='TButton').pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(actions_frame_row1, text="💰 Pagar Saldo", command=self.on_extra_payment, style='TButton').pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(actions_frame_row1, text="↩️ Desfazer Pagamento", command=self.on_reverse_payment, style='Delete.TButton').pack(side=tk.LEFT, padx=(0, 10))
+        
+        # Fileira 2
+        actions_frame_row2 = tk.Frame(left_buttons_frame, bg="#0a192f")
+        actions_frame_row2.pack(fill=tk.X, pady=(5,0)) # Adiciona um espaçamento entre as fileiras
+
+        ttk.Button(actions_frame_row2, text=" Punição", command=self.on_add_punishment, style='TButton').pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(actions_frame_row2, text="Saldos Iniciais", command=self.on_edit_initial_balance, style='TButton').pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(actions_frame_row2, text="Abonar Falta", command=self.on_abone_falta, style='TButton').pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(actions_frame_row2, text="Relatório Detalhado", command=self.on_detailed_report, style='TButton').pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(actions_frame_row2, text="📄 Exportar Log", command=self.on_export_log, style='TButton').pack(side=tk.LEFT, padx=(0, 10))
+        
+        # --- FIM DA MODIFICAÇÃO ---
+
+        # (O resto do seu código original)
         log_frame = ttk.LabelFrame(main_frame, text=" Log ", style='TLabelframe')
         log_frame.grid(row=1, column=1, sticky="nsew", pady=5, padx=(5, 0))
         self.log_area = scrolledtext.ScrolledText(log_frame, bg="#112240", fg="#a8b2d1", insertbackground="white", font=("Consolas", 9), relief=tk.FLAT, borderwidth=5)
@@ -4459,14 +4476,13 @@ class App:
             threading.Thread(target=self._run_update_check, daemon=True).start()
 
     def _run_update_check(self):
-        """Executa a lógica de verificação de atualização (rodando em uma thread)."""
+        """Executa a lógica de verificação e download da atualização."""
         # Aponta para o novo repositório PÚBLICO de lançamentos
         API_URL = "https://api.github.com/repos/SH1NNxs/projeto_ponto-releases/releases/latest"
         
         try:
-            # O 'timeout' é importante para não travar para sempre se não houver internet
             response = requests.get(API_URL, headers={"Accept": "application/vnd.github.v3+json"}, timeout=5)
-            response.raise_for_status() # Lança um erro se a resposta for 4xx ou 5xx
+            response.raise_for_status()
             
             data = response.json()
             latest_tag = data.get('tag_name')
@@ -4482,17 +4498,68 @@ class App:
             if version.parse(latest_tag) > version.parse(CURRENT_VERSION):
                 self.append_log(f"Nova versão {latest_tag} encontrada!")
                 
-                # Pega a URL da PÁGINA de release (não o .exe direto)
-                download_page_url = data.get('html_url')
+                # --- LÓGICA DE DOWNLOAD AUTOMÁTICO ---
                 
-                if messagebox.askyesno("Nova Versão Encontrada",
+                # 1. Encontrar a URL do asset (.exe)
+                asset_url = None
+                exe_name = None
+                for asset in data.get('assets', []):
+                    # Procura pelo nome do .exe principal
+                    if asset.get('name', '').lower() == "WN Ponto Certo.exe".lower():
+                        asset_url = asset.get('browser_download_url')
+                        exe_name = asset.get('name')
+                        break
+                
+                if not asset_url:
+                    self.append_log("Erro: Lançamento encontrado, mas sem 'WN Ponto Certo.exe' anexado.")
+                    messagebox.showerror("Erro de Atualização", "A nova versão foi encontrada, mas não há um ficheiro .exe para baixar.", parent=self.root)
+                    return
+
+                if not messagebox.askyesno("Nova Versão Encontrada",
                                        f"Uma nova versão ({latest_tag}) está disponível!\n\n"
-                                       "Você está usando a versão {CURRENT_VERSION}.\n\n"
-                                       "Deseja abrir a página de download agora?",
+                                       "Deseja baixar e instalar a atualização agora?\n\n"
+                                       "O programa será reiniciado.",
                                        parent=self.root):
-                    
-                    self.append_log(f"Abrindo página de download: {download_page_url}")
-                    webbrowser.open_new(download_page_url)
+                    self.append_log("Atualização recusada pelo usuário.")
+                    return
+
+                # 2. Baixar o .exe para um ficheiro temporário
+                self.append_log(f"A baixar {exe_name}...")
+                
+                temp_dir = tempfile.gettempdir()
+                new_exe_temp_path = os.path.join(temp_dir, f"{exe_name}_new.exe")
+
+                with requests.get(asset_url, stream=True) as r:
+                    r.raise_for_status()
+                    with open(new_exe_temp_path, 'wb') as f:
+                        for chunk in r.iter_content(chunk_size=8192):
+                            f.write(chunk)
+                
+                self.append_log(f"Download concluído: {new_exe_temp_path}")
+
+                # 3. Localizar o updater.exe e o .exe atual
+                # (sys.executable é o caminho para o .exe atual quando compilado)
+                current_exe_path = sys.executable
+                current_dir = os.path.dirname(current_exe_path)
+                updater_exe_path = os.path.join(current_dir, "updater.exe")
+
+                if not os.path.exists(updater_exe_path):
+                    self.append_log("ERRO CRÍTICO: updater.exe não encontrado!")
+                    messagebox.showerror("Erro de Atualização", f"O ficheiro 'updater.exe' não foi encontrado na pasta do programa.\n\nA atualização não pode continuar.", parent=self.root)
+                    return
+
+                # 4. Chamar o updater e fechar
+                self.append_log("A iniciar o updater e a fechar...")
+
+                pid = os.getpid()
+                
+                subprocess.Popen([updater_exe_path, str(pid), current_exe_path, new_exe_temp_path])
+                
+                # Fecha o programa principal
+                self.root.destroy()
+                
+                # --- FIM DA LÓGICA DE DOWNLOAD ---
+
             else:
                 self.append_log("O sistema já está atualizado.")
                 messagebox.showinfo("Tudo Certo!",
