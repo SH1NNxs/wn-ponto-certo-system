@@ -16,7 +16,7 @@ import webbrowser
 from packaging import version
 
 # Use a tag exata que você criou no GitHub (ex: v1.0.0)
-CURRENT_VERSION = "v1.0.0"
+CURRENT_VERSION = "v1.1.0"
 
 # Tenta importar bibliotecas necessárias
 try:
@@ -40,7 +40,7 @@ except ImportError:
     # --- ADICIONE ESTA LINHA ---
     # Esta é a versão ATUAL do seu .exe.
     # Você DEVE atualizar este número antes de compilar um NOVO .exe para uma nova release.
-    CURRENT_VERSION = "v1.0.0" 
+    CURRENT_VERSION = "v1.1.0" 
     # --- FIM ---
 
 # -------------------------
