@@ -72,7 +72,7 @@ LOGO_ICON_PATH = base_path_asset.joinpath("wn_logo.ico")
 # -------------------------
 
 # Define a data de início de operação do sistema. Cálculos ignoram datas anteriores.
-SYSTEM_START_DATE = "2025-10-20" # <-- Data de início FIXA
+SYSTEM_START_DATE = "2025-12-01" # <-- Data de início FIXA
 # Define a "data atual" para ser usada nos cálculos de recálculo diário.
 SYSTEM_CURRENT_DATE = datetime.now().date()
 
@@ -162,7 +162,6 @@ def format_minutes_to_hms(minutes):
         hours += 1
         remaining_minutes = 0
     return f"{sign}{hours:02}:{remaining_minutes:02}:{seconds:02}"
-
 
 def parse_hhmm_to_minutes(time_str):
     """Converte uma string HH:MM ou HH:MM:SS para minutos decimais."""
@@ -1429,8 +1428,7 @@ class DateRangePicker:
                             background=style_colors['ACCENT_COLOR'], foreground="white", headersbackground=style_colors['ACCENT_COLOR'],
                             normalbackground=style_colors['LIGHT_BG'], weekendbackground="#172a45",
                             othermonthbackground=style_colors['BG_COLOR'], othermonthforeground="#6a7b9d",
-                            selectbackground=style_colors['ACCENT_COLOR'],
-                            mindate=min_date) # mindate definido aqui
+                            selectbackground=style_colors['ACCENT_COLOR'])
 
         self.cal.pack(side=tk.LEFT, padx=(0, 20))
         self.cal.bind("<<CalendarSelected>>", self._on_calendar_click)
