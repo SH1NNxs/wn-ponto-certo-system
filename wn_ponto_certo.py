@@ -18,7 +18,13 @@ import subprocess
 import tempfile
 
 # --- VERSÃO ATUAL ---
-CURRENT_VERSION = "v1.2.5"
+CURRENT_VERSION = "v1.3.0"
+
+# Define a data atual para referência dos cálculos de saldo
+SYSTEM_CURRENT_DATE = date.today()
+
+# Inicializa o Marco Zero do sistema (será atualizado pelo banco de dados)
+SYSTEM_START_DATE = "2025-01-01"
 
 # Tenta importar bibliotecas necessárias
 try:
@@ -65,11 +71,41 @@ LOGO_ICON_PATH = base_path_asset.joinpath("wn_logo.ico")
 # CONSTANTES E FUNÇÕES DE APOIO
 # -------------------------
 
-# Define a data de início de operação do sistema. Cálculos ignoram datas anteriores.
-SYSTEM_START_DATE = "2025-12-01" # <-- Data de início FIXA
-# Define a "data atual" para ser usada nos cálculos de recálculo diário.
-SYSTEM_CURRENT_DATE = datetime.now().date()
+def create_database(self):
+        c = self.conn.cursor()
+        # ... (suas criações de tabelas permanecem iguais)
+        
+        self.conn.commit()
 
+def create_database(self):
+        global SYSTEM_START_DATE 
+        c = self.conn.cursor()
+        
+        # Criação de todas as tabelas (Funcionarios, configuracoes, horas_trabalhadas, etc.)
+        # ... (mantenha seus comandos c.execute atuais aqui) ...
+
+        self.conn.commit()
+
+        # Busca a configuração gravada no SSD
+        c.execute("SELECT valor FROM configuracoes WHERE chave = 'data_inicio_sistema'")
+        config_data = c.fetchone()
+
+        if not config_data:
+            from tkinter import simpledialog, messagebox
+            data_digitada = simpledialog.askstring("Configuração Inicial", "Data de início dos cálculos (DD/MM/AAAA):")
+            if data_digitada:
+                try:
+                    data_iso = datetime.strptime(data_digitada, "%d/%m/%Y").strftime("%Y-%m-%d")
+                    c.execute("INSERT INTO configuracoes (chave, valor) VALUES (?, ?)", ('data_inicio_sistema', data_iso))
+                    self.conn.commit()
+                    SYSTEM_START_DATE = data_iso
+                except:
+                    SYSTEM_START_DATE = "2025-01-01"
+            else:
+                SYSTEM_START_DATE = "2025-01-01"
+        else:
+            # ESSENCIAL: Atualiza a variável global com o que está no banco
+            SYSTEM_START_DATE = config_data['valor']
 
 MINUTOS_JORNADA_SEG_SEX = 8 * 60
 MINUTOS_JORNADA_SABADO = 4 * 60
@@ -267,7 +303,12 @@ class DatabaseManager:
         return True
 
     def create_database(self):
+        """
+        Cria a estrutura de tabelas do banco de dados e verifica a configuração inicial.
+        """
         c = self.conn.cursor()
+        
+        # Tabela de Funcionários
         c.execute("""
             CREATE TABLE IF NOT EXISTS funcionarios (
                 id INTEGER PRIMARY KEY,
@@ -282,13 +323,95 @@ class DatabaseManager:
                 extras_disponiveis_inicial INTEGER DEFAULT 0
             )
         """)
-        c.execute("CREATE TABLE IF NOT EXISTS horas_trabalhadas (id INTEGER PRIMARY KEY, matricula TEXT, data TEXT, minutos_totais TEXT, periodos TEXT, ignorar_atraso INTEGER DEFAULT 0, criado_em DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(matricula, data))")
-        c.execute("CREATE TABLE IF NOT EXISTS log_edicoes (id INTEGER PRIMARY KEY, matricula TEXT, data_ponto TEXT, data_edicao DATETIME DEFAULT CURRENT_TIMESTAMP, periodos_antigos TEXT, periodos_novos TEXT, justificativa TEXT, usuario TEXT DEFAULT 'SYSTEM/MANUAL')")
+
+        # Tabela de Configurações (Marco Zero do Sistema)
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS configuracoes (
+                chave TEXT PRIMARY KEY,
+                valor TEXT
+            )
+        ''')
+
+        # Tabela de Horas Trabalhadas
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS horas_trabalhadas (
+                id INTEGER PRIMARY KEY, 
+                matricula TEXT, 
+                data TEXT, 
+                minutos_totais TEXT, 
+                periodos TEXT, 
+                ignorar_atraso INTEGER DEFAULT 0, 
+                criado_em DATETIME DEFAULT CURRENT_TIMESTAMP, 
+                UNIQUE(matricula, data)
+            )
+        """)
+
+        # Tabela de Logs de Edição
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS log_edicoes (
+                id INTEGER PRIMARY KEY, 
+                matricula TEXT, 
+                data_ponto TEXT, 
+                data_edicao DATETIME DEFAULT CURRENT_TIMESTAMP, 
+                periodos_antigos TEXT, 
+                periodos_novos TEXT, 
+                justificativa TEXT, 
+                usuario TEXT DEFAULT 'SYSTEM/MANUAL'
+            )
+        """)
+
+        # Tabelas de Feriados
         c.execute("CREATE TABLE IF NOT EXISTS feriados (id INTEGER PRIMARY KEY, data TEXT UNIQUE, descricao TEXT, tipo TEXT)")
         c.execute("CREATE TABLE IF NOT EXISTS feriados_recorrentes (id INTEGER PRIMARY KEY, dia INTEGER, mes INTEGER, descricao TEXT, tipo TEXT, UNIQUE(dia, mes))")
-        c.execute("CREATE TABLE IF NOT EXISTS punicoes (id INTEGER PRIMARY KEY, matricula TEXT, data_punicao TEXT, minutos_descontados REAL DEFAULT 0, motivo TEXT, data_registro DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (matricula) REFERENCES funcionarios (matricula))")
-        c.execute("CREATE TABLE IF NOT EXISTS abonos (id INTEGER PRIMARY KEY, matricula TEXT, data TEXT, motivo TEXT, minutos_abonados REAL DEFAULT 0, data_registro DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(matricula, data))")
+
+        # Tabelas de Punições e Abonos
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS punicoes (
+                id INTEGER PRIMARY KEY, 
+                matricula TEXT, 
+                data_punicao TEXT, 
+                minutos_descontados REAL DEFAULT 0, 
+                motivo TEXT, 
+                data_registro DATETIME DEFAULT CURRENT_TIMESTAMP, 
+                FOREIGN KEY (matricula) REFERENCES funcionarios (matricula)
+            )
+        """)
+        
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS abonos (
+                id INTEGER PRIMARY KEY, 
+                matricula TEXT, 
+                data TEXT, 
+                motivo TEXT, 
+                minutos_abonados REAL DEFAULT 0, 
+                data_registro DATETIME DEFAULT CURRENT_TIMESTAMP, 
+                UNIQUE(matricula, data)
+            )
+        """)
+
         self.conn.commit()
+
+        # --- LÓGICA DE MARCO ZERO (DATA DE INÍCIO) ---
+        c.execute("SELECT valor FROM configuracoes WHERE chave = 'data_inicio_sistema'")
+        config_data = c.fetchone()
+
+        if not config_data:
+            from tkinter import simpledialog, messagebox
+            # Pergunta ao usuário a data de início para evitar saldos negativos retroativos
+            data_inicio = simpledialog.askstring(
+                "Configuração Inicial", 
+                "O banco de dados é novo.\nInforme a data de início dos cálculos (DD/MM/AAAA):"
+            )
+            
+            if data_inicio:
+                # Salva a data para consultas futuras em cálculos de saldo
+                c.execute("INSERT INTO configuracoes (chave, valor) VALUES (?, ?)", ('data_inicio_sistema', data_inicio))
+                self.conn.commit()
+                messagebox.showinfo("Sucesso", f"Marco zero definido para: {data_inicio}")
+            else:
+                messagebox.showwarning("Atenção", "Nenhuma data definida. Cálculos retroativos podem gerar saldos inesperados.")
+
+
 
     def populate_fixed_holidays(self):
         fixed_holidays = [
@@ -1727,7 +1850,13 @@ class App:
         header_frame.pack(fill=tk.X)
         try:
             logo_img = PILImage.open(LOGO_PATH)
-            logo_img = logo_img.resize((45, 45), Image.Resampling.LANCZOS)
+            # Tenta usar a sintaxe nova, se falhar usa a antiga
+            try:
+                resample_method = PILImage.LANCZOS 
+            except AttributeError:
+                resample_method = Image.LANCZOS
+                
+            logo_img = logo_img.resize((45, 45), resample_method)
             self.logo_photo = ImageTk.PhotoImage(logo_img)
             logo_label = tk.Label(header_frame, image=self.logo_photo, bg="#0a192f")
             logo_label.pack(side=tk.LEFT, padx=(0, 10))
