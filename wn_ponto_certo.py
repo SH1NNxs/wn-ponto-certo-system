@@ -17,14 +17,12 @@ from packaging import version
 import subprocess
 import tempfile
 
-# --- VERSÃO ATUAL ---
-CURRENT_VERSION = "v1.3.0"
-
-# Define a data atual para referência dos cálculos de saldo
+# --- CONFIGURAÇÕES GLOBAIS ---
+CURRENT_VERSION = "v1.3.2" # Atualizamos a versão para controle
 SYSTEM_CURRENT_DATE = date.today()
 
-# Inicializa o Marco Zero do sistema (será atualizado pelo banco de dados)
-SYSTEM_START_DATE = "2025-01-01"
+# ESTE É O SEU MARCO ZERO SOLICITADO
+SYSTEM_START_DATE = "2026-01-31"
 
 # Tenta importar bibliotecas necessárias
 try:
@@ -260,6 +258,36 @@ class DatabaseManager:
         self.create_database()
         self.check_migrations() 
         self.populate_fixed_holidays()
+    
+    def get_weekly_balance_until_friday(self, matricula, data_sabado_str):
+        """Calcula o saldo acumulado de segunda a sexta (40h exigidas)."""
+        data_sabado = datetime.strptime(data_sabado_str, "%Y-%m-%d")
+        segunda = data_sabado - timedelta(days=5)
+        sexta = data_sabado - timedelta(days=1)
+        
+        c = self.conn.cursor()
+        c.execute("SELECT minutos_totais FROM horas_trabalhadas WHERE matricula = ? AND data BETWEEN ? AND ?", 
+                  (matricula, segunda.strftime("%Y-%m-%d"), sexta.strftime("%Y-%m-%d")))
+        logs = c.fetchall()
+        
+        # Soma os minutos trabalhados na semana (Seg-Sex)
+        minutos_trabalhados = sum(parse_hhmm_to_minutes(log[0]) for log in logs)
+        
+        # Saldo = Trabalhado - 40 horas (2400 minutos)
+        return minutos_trabalhados - 2400
+
+    def get_first_entry_of_day(self, matricula, data_str):
+        """Busca a primeira batida de ponto (E1) do dia informado."""
+        c = self.conn.cursor()
+        c.execute("SELECT periodos FROM horas_trabalhadas WHERE matricula = ? AND data = ?", (matricula, data_str))
+        row = c.fetchone()
+        if row:
+            try:
+                periodos = json.loads(row[0])
+                if periodos:
+                    return datetime.strptime(periodos[0]['entrada'], "%Y-%m-%d %H:%M:%S").strftime("%H:%M")
+            except: return None
+        return None
 
     def check_migrations(self):
         """Verifica e cria colunas novas necessárias."""
@@ -1341,13 +1369,11 @@ class DatabaseManager:
 
     
     def reprocess_daily_data(self, matricula):
-        """
-        Força o reprocessamento de cada dia importado usando a lógica de cálculo ATUAL.
-        Isso corrige dias importados antes de atualizações de regras (ex: chegada antecipada).
-        """
+        """Reprocessa os dias aplicando tolerância zero e carga dinâmica aos sábados."""
+        global SYSTEM_START_DATE
         c = self.conn.cursor()
-        # Pega todos os dias desse funcionário
-        c.execute("SELECT data, periodos, ignorar_atraso FROM horas_trabalhadas WHERE matricula=?", (matricula,))
+        # Filtra a partir do Marco Zero definido no topo
+        c.execute("SELECT data, periodos, ignorar_atraso FROM horas_trabalhadas WHERE matricula = ? AND data >= ?", (matricula, SYSTEM_START_DATE))
         rows = c.fetchall()
         
         func_info = self.get_funcionario_info(matricula)
@@ -1356,39 +1382,43 @@ class DatabaseManager:
         with self.conn:
             for row in rows:
                 data_str = row['data']
+                data_dt = datetime.strptime(data_str, "%Y-%m-%d")
+                is_sabado = (data_dt.weekday() == 5)
                 ignorar_atraso = row['ignorar_atraso'] == 1
+                
+                # Sábado: Tolerância ZERO. Outros dias: 5 min
+                tolerancia_uso = 0 if is_sabado else 5
+                
                 try:
                     periodos_json = json.loads(row['periodos'])
                 except: continue
                 
-                if not periodos_json: continue
-
                 minutos_totais_novo = 0
                 novos_periodos = []
                 
                 for i, p in enumerate(periodos_json):
                     entrada_str = p.get('entrada')
                     saida_str = p.get('saida')
-                    
-                    if not entrada_str: 
-                        novos_periodos.append(p)
-                        continue
+                    if not entrada_str: continue
 
                     ent = datetime.strptime(entrada_str, "%Y-%m-%d %H:%M:%S")
                     sai = datetime.strptime(saida_str, "%Y-%m-%d %H:%M:%S") if saida_str else None
                     
-                    # RECALCULA usando a função global atualizada (que aceita chegada cedo)
-                    # i*2 garante que o turno da tarde (index 1) vire turno_idx 2 (13:00)
+                    # Cálculo utilizando a tolerância dinâmica
                     _, liquido, deducao = calculate_period_data(ent, sai, data_str, i*2, setor, ignore_delay_flag=ignorar_atraso)
                     
-                    minutos_totais_novo += liquido
+                    # Reforço: Atraso no sábado gera dedução imediata
+                    if is_sabado and not ignorar_atraso:
+                        horario_oficial = datetime.strptime(f"{data_str} 07:30", "%Y-%m-%d %H:%M")
+                        atraso_real = (ent - horario_oficial).total_seconds() / 60
+                        if atraso_real > 0:
+                            deducao = calculate_deduction(atraso_real, setor)
                     
-                    # Atualiza os detalhes no JSON para o relatório ficar correto também
+                    minutos_totais_novo += liquido
                     p['minutos_liquidos'] = format_minutes_to_hms(liquido)
                     p['deducao_minutos'] = format_minutes_to_hms(deducao)
                     novos_periodos.append(p)
 
-                # Salva o novo total calculado no Banco
                 self.conn.execute("UPDATE horas_trabalhadas SET minutos_totais=?, periodos=? WHERE matricula=? AND data=?", 
                                   (format_minutes_to_hms(minutos_totais_novo), json.dumps(novos_periodos), matricula, data_str))
     
@@ -1556,6 +1586,8 @@ class DatabaseManager:
         stats['extras_geradas_periodo'] = stats['extras_end'] - stats['extras_start']
 
         return stats
+    
+    
 
 # --- Função import_glog_txt ---
 def import_glog_txt(filepath, db_manager, logger=print):
@@ -2704,6 +2736,7 @@ class App:
 
             except Exception as e:
                 messagebox.showerror("Erro PDF", f"Erro ao gerar PDF: {e}", parent=win)
+        
 
         def process_fichado_payment():
             matricula = cmb_func.get().split(" - ")[0]
@@ -3149,110 +3182,89 @@ class App:
         btn_export = ttk.Button(form_frame, text="Gerar PDF", style='TButton'); 
         btn_export.pack(pady=20)
         
-        def generate_pdf():
-            selection = cmb_func.get();
-            if not selection: 
-                messagebox.showerror("Erro", "Funcionário não selecionado.", parent=win); return
-            
-            matricula = selection.split(" - ")[0]; 
-            nome_func = " ".join(selection.split(" - ")[1:])
-            
-            start_dt, end_dt = date_picker.get_dates()
-
-            try:
-                if not start_dt or not end_dt:
-                    messagebox.showerror("Erro", "Selecione um período válido (Início e Fim).", parent=win)
-                    return
-                
-                if end_dt < start_dt:
-                    messagebox.showerror("Erro", "Data final não pode ser anterior à data inicial.", parent=win)
-                    return
-                if start_dt < datetime.strptime(SYSTEM_START_DATE, "%Y-%m-%d").date():
-                    messagebox.showerror("Erro", f"Data de início não pode ser anterior a {SYSTEM_START_DATE}.", parent=win)
-                    return
-            except Exception as e:
-                messagebox.showerror("Erro", f"Datas inválidas: {e}", parent=win)
+        def generate_pdf(self):
+            """Gera o espelho de ponto com saída dinâmica no sábado (apenas para saldo positivo)."""
+            if not self.current_view_data:
+                messagebox.showwarning("Aviso", "Não há dados para gerar o PDF.", parent=self.root)
                 return
 
-            logs = self.db.get_logs_for_period(matricula, start_dt, end_dt)
-            if not logs: 
-                messagebox.showinfo("Aviso", "Nenhum log encontrado.", parent=win); return
+            target_matricula = self.combo_func.get().split(" - ")[0]
+            func_info = self.db.get_funcionario_info(target_matricula)
+            func_nome = func_info.get('nome', 'N/D')
+            setor = func_info.get('setor', 'N/D')
+            fichado_status = "Sim" if func_info.get('fichado') == 1 else "Não"
 
-            filepath = filedialog.asksaveasfilename(
-                defaultextension=".pdf", 
-                filetypes=[("PDF files", "*.pdf")], 
-                title="Salvar Relatório", 
-                initialfile=f"Log_{nome_func.replace(' ','_')}_{start_dt.isoformat()}_a_{end_dt.isoformat()}.pdf"
+            data_inicio = self.ent_data_inicio.get()
+            data_fim = self.ent_data_fim.get()
+
+            file_path = filedialog.asksaveasfilename(
+                defaultextension=".pdf",
+                initialfile=f"Espelho_Ponto_{func_nome}_{data_inicio}_a_{data_fim}.pdf",
+                filetypes=[("PDF files", "*.pdf")]
             )
-            if not filepath: 
-                return
+            if not file_path: return
+
+            doc = SimpleDocTemplate(file_path, pagesize=landscape(A4))
+            elements = []
+            styles = getSampleStyleSheet()
+
+            # Cabeçalho
+            elements.append(Paragraph(f"<b>Funcionário:</b> {func_nome} (Mat. {target_matricula})", styles['Normal']))
+            elements.append(Paragraph(f"<b>Período:</b> {data_inicio} a {data_fim}", styles['Normal']))
+            elements.append(Paragraph(f"<b>Fichado:</b> {fichado_status} | <b>Setor:</b> {setor}", styles['Normal']))
+            
+            # --- LÓGICA DE SAÍDA DO SÁBADO (Zerar Banco) ---
+            texto_saida_sabado = "11:30" # Valor padrão
+            for row in self.current_view_data:
+                if row['Dia'] == "Sábado":
+                    data_sab_str = row['Data']
+                    saldo_semana = self.db.get_weekly_balance_until_friday(target_matricula, data_sab_str)
+                    
+                    # Regra: Se saldo for positivo (horas extras), calcula saída antecipada.
+                    # Se saldo for negativo ou zero, mantém 11:30.
+                    if saldo_semana > 0:
+                        entrada_real = self.db.get_first_entry_of_day(target_matricula, data_sab_str)
+                        if entrada_real:
+                            try:
+                                # Carga necessária no sábado para fechar 44h (240 min - saldo extra)
+                                minutos_necessarios = 240 - saldo_semana
+                                hora_ent = datetime.strptime(entrada_real, "%H:%M")
+                                saida_calc = hora_ent + timedelta(minutes=minutos_necessarios)
+                                texto_saida_sabado = saida_calc.strftime("%H:%M")
+                            except: pass
+                    break
+
+            elements.append(Paragraph(f"<b>Horário de Saída no Sábado (p/ zerar 44h):</b> {texto_saida_sabado}", styles['Normal']))
+            elements.append(Spacer(1, 0.5 * cm))
+            elements.append(Paragraph("<b>Espelho de Ponto</b>", styles['Title']))
+            elements.append(Spacer(1, 0.5 * cm))
+
+            # Tabela
+            header = ["Dia", "Data", "E1", "S1", "E2", "S2", "Carga", "Punição", "Desconto"]
+            table_data = [header]
+            total_minutos = 0
+            for row in self.current_view_data:
+                table_data.append([row['Dia'], row['Data'], row['E1'], row['S1'], row['E2'], row['S2'], row['Carga'], row['Punição'], row['Desconto']])
+                total_minutos += parse_hhmm_to_minutes(row['Carga'])
+
+            t = Table(table_data, repeatRows=1)
+            t.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('FONTSIZE', (0, 0), (-1, -1), 8),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black)
+            ]))
+            elements.append(t)
+            elements.append(Spacer(1, 0.5 * cm))
+            elements.append(Paragraph(f"<b>Carga Horária Trabalhada no Período:</b> {format_minutes_to_hms(total_minutos)}", styles['Normal']))
             
             try:
-                doc = SimpleDocTemplate(filepath, pagesize=landscape(A4), rightMargin=2*cm, leftMargin=2*cm, topMargin=2*cm, bottomMargin=2*cm); 
-                styles = getSampleStyleSheet(); 
-                story = []
-                
-                style_table_header = ParagraphStyle(
-                    name='TableHeader',
-                    parent=styles['Normal'],
-                    fontName='Helvetica-Bold',
-                    textColor=colors.whitesmoke,
-                    alignment=TA_CENTER
-                )
-                style_cell_left = ParagraphStyle(
-                    name='TableCellLeft',
-                    parent=styles['Normal'],
-                    fontSize=8,
-                    textColor=colors.black,
-                    alignment=TA_LEFT
-                )
-                style_cell_center = ParagraphStyle(
-                    name='TableCellCenter',
-                    parent=styles['Normal'],
-                    fontSize=8,
-                    textColor=colors.black,
-                    alignment=TA_CENTER
-                )
-                
-                story.append(Paragraph("Relatório Log Alterações", styles['h1'])); 
-                story.append(Spacer(1, 0.5*cm)); 
-                story.append(Paragraph(f"<b>Funcionário:</b> {nome_func}", styles['Normal'])); 
-                story.append(Paragraph(f"<b>Matrícula:</b> {matricula}", styles['Normal'])); 
-                story.append(Paragraph(f"<b>Período:</b> {start_dt.strftime('%d/%m/%Y')} a {end_dt.strftime('%d/%m/%Y')}", styles['Normal'])); 
-                story.append(Spacer(1, 1*cm))
-                
-                col_headers = ['Data Ponto', 'Data Edição', 'Valor Antigo', 'Valor Novo', 'Justificativa']
-                table_data = [[Paragraph(h, style_table_header) for h in col_headers]]
-                
-                for log in logs:
-                    row = [
-                        Paragraph(datetime.strptime(log['data_ponto'], '%Y-%m-%d').strftime('%d/%m/%Y'), style_cell_center), 
-                        Paragraph(datetime.strptime(log['data_edicao'], '%Y-%m-%d %H:%M:%S').strftime('%d/%m/%Y %H:%M'), style_cell_center), 
-                        Paragraph(log['periodos_antigos'], style_cell_left), 
-                        Paragraph(log['periodos_novos'], style_cell_left), 
-                        Paragraph(log['justificativa'], style_cell_center)
-                    ]
-                    table_data.append(row)
-                
-                t = Table(table_data, colWidths=[2.5*cm, 3.0*cm, 8.0*cm, 8.0*cm, 4.0*cm]); 
-                t.setStyle(TableStyle([
-                    ('BACKGROUND', (0,0), (-1,0), colors.teal), 
-                    ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke), 
-                    ('ALIGN', (0,0), (-1,-1), 'CENTER'), 
-                    ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'), 
-                    ('BOTTOMPADDING', (0,0), (-1,0), 12), 
-                    ('BACKGROUND', (0,1), (-1,-1), colors.beige), 
-                    ('GRID', (0,0), (-1,-1), 1, colors.black),
-                    ('VALIGN', (0,0), (-1,-1), 'TOP')
-                ]))
-                story.append(t); 
-                doc.build(story); 
-                messagebox.showinfo("Sucesso", f"Relatório salvo:\n{filepath}", parent=win); 
-                win.destroy()
-            except Exception as e: 
-                messagebox.showerror("Erro PDF", f"Erro: {e}", parent=win)
-        
-        btn_export.config(command=generate_pdf)
+                doc.build(elements)
+                messagebox.showinfo("Sucesso", f"PDF Gerado: {file_path}", parent=self.root)
+                os.startfile(file_path)
+            except Exception as e:
+                messagebox.showerror("Erro", f"Falha ao gerar PDF: {e}", parent=self.root)
 
     # --- INÍCIO DAS NOVAS FUNÇÕES ---
     def find_next_business_day(self, start_date, is_fichado):
@@ -4179,6 +4191,23 @@ class App:
             for lbl in [getattr(self, 'lbl_total_punishments', None)]:
                 if lbl: lbl.config(text="Total Punições: --")
             return
+
+        # Lógica para exibir a Saída Sugerida no Sábado (Interface)
+        if start_date.weekday() == 5: # Se o dia selecionado for Sábado
+            # Busca o saldo acumulado de Seg a Sex desta semana específica
+            saldo_semana = self.db.get_weekly_balance_until_friday(target_matricula, start_date.isoformat())
+            
+            # Carga padrão do sábado é 4h (240 min). 
+            # Subtraímos o saldo positivo (extra) ou somamos o negativo (atraso)
+            minutos_para_44h = 240 - saldo_semana
+            
+            # Pega a entrada real do sábado (E1) do primeiro item do panorama
+            if panorama_data and panorama_data[0]['E1']:
+                entrada_sabado = datetime.strptime(f"{panorama_data[0]['Data']} {panorama_data[0]['E1']}", "%Y-%m-%d %H:%M")
+                saida_ideal = entrada_sabado + timedelta(minutes=minutos_para_44h)
+                
+                # Exibe para o usuário (certifique-se que o label lbl_saldo_bh_total existe na sua UI)
+                self.append_log(f"Sugestão p/ Sábado: Sair às {saida_ideal.strftime('%H:%M')} para fechar 44h.")
 
         selected_func = self.cmb_filter_func.get(); target_matricula = selected_func.split(" - ")[0] if selected_func != "Todos" else None; [self.tree_viewer.delete(i) for i in self.tree_viewer.get_children()]
 
