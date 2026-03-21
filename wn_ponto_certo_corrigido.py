@@ -87,13 +87,21 @@ LOGO_ICON_PATH = base_path_asset.joinpath("wn_logo.ico")
 # -------------------------
 
 def safe_json_load(data):
-    """Garante que o dado retornado seja sempre uma lista/dict, nunca string bruta."""
-    if isinstance(data, str):
-        try:
-            return json.loads(data)
-        except (json.JSONDecodeError, TypeError):
-            return []
-    return data if data is not None else []
+    """Garante retorno consistente mesmo quando o JSON foi serializado duas vezes."""
+    if data is None:
+        return []
+
+    current = data
+    for _ in range(2):
+        if isinstance(current, str):
+            try:
+                current = json.loads(current)
+                continue
+            except (json.JSONDecodeError, TypeError):
+                return []
+        break
+
+    return current if current is not None else []
 
 # --- FUNÇÃO calculate_deduction ---
 def calculate_deduction(minutes_late, sector=None):
@@ -924,25 +932,32 @@ class DatabaseManager:
         """Padronização Inteligente: Garante 8 dígitos e retorno tipo DICT."""
         try:
             c = self.conn.cursor()
-            # Aplica a lógica de matrícula automaticamente
             mat_padrao = str(matricula).strip().zfill(8)
             c.execute("SELECT * FROM funcionarios WHERE matricula = ?", (mat_padrao,))
             row = c.fetchone()
-            
-            # Se encontrar, converte Row para Dict. Se não, retorna None (não string!)
             return dict(row) if row else None
         except Exception as e:
             print(f"Erro na busca do funcionário {matricula}: {e}")
             return None
 
     def get_point_panorama(self, start_date, end_date, matricula=None):
+        """
+        Busca os dados do panorama em formato estável para toda a UI.
+        Mantém as mesmas regras de negócio, apenas normaliza o formato de saída
+        para evitar KeyError e problemas com JSON/string.
+        """
         c = self.conn.cursor()
 
         s_str = start_date.isoformat() if hasattr(start_date, 'isoformat') else str(start_date)
         e_str = end_date.isoformat() if hasattr(end_date, 'isoformat') else str(end_date)
 
         query = """
-            SELECT f.matricula, f.nome, h.data, h.minutos_totais, h.periodos
+            SELECT
+                f.matricula AS matricula,
+                f.nome AS nome,
+                h.data AS data,
+                h.minutos_totais AS minutos_totais,
+                h.periodos AS periodos
             FROM funcionarios f
             LEFT JOIN horas_trabalhadas h ON f.matricula = h.matricula
             WHERE h.data BETWEEN ? AND ?
@@ -957,37 +972,55 @@ class DatabaseManager:
         rows = c.fetchall()
 
         panorama = []
-
         for r in rows:
-            periodos = safe_json_load(r['periodos'])
+            row_dict = dict(r)
+            periodos_raw = row_dict.get('periodos')
+            periodos = safe_json_load(periodos_raw)
+            if not isinstance(periodos, list):
+                periodos = []
 
             batidas = {"E1": "", "S1": "", "E2": "", "S2": ""}
+            total_desconto_min = 0
 
             for i, p in enumerate(periodos[:2]):
                 if not isinstance(p, dict):
                     continue
 
-                if p.get('entrada'):
-                    batidas[f"E{i+1}"] = p['entrada'].split(' ')[1][:5]
+                entrada = p.get('entrada')
+                saida = p.get('saida')
 
-                if p.get('saida'):
-                    batidas[f"S{i+1}"] = p['saida'].split(' ')[1][:5]
+                if entrada and ' ' in entrada:
+                    batidas[f"E{i+1}"] = entrada.split(' ')[1][:5]
+                if saida and ' ' in saida:
+                    batidas[f"S{i+1}"] = saida.split(' ')[1][:5]
+
+                total_desconto_min += parse_hhmm_to_minutes(p.get('deducao_minutos', '00:00:00'))
 
             panorama.append({
-                'Matricula': r['matricula'],
-                'Nome': r['nome'],
-                'Data': r['data'],
+                # chaves minúsculas para compatibilidade com a UI atual
+                'matricula': row_dict.get('matricula', ''),
+                'nome': row_dict.get('nome', ''),
+                'data': row_dict.get('data'),
+                'minutos_totais': row_dict.get('minutos_totais') or "00:00:00",
+                'periodos': json.dumps(periodos, ensure_ascii=False, default=str),
+
+                # chaves auxiliares já prontas para a tree/exportação
                 'E1': batidas["E1"],
                 'S1': batidas["S1"],
                 'E2': batidas["E2"],
                 'S2': batidas["S2"],
-                'Carga_Horaria': r['minutos_totais'] or "00:00:00",
-                'Total_Desconto': "00:00:00",
-                'is_incomplete': any(p.get('saida') is None for p in periodos if isinstance(p, dict))
+                'Carga_Horaria': row_dict.get('minutos_totais') or "00:00:00",
+                'Total_Desconto': format_minutes_to_hms(total_desconto_min),
+                'is_incomplete': any(isinstance(p, dict) and p.get('saida') is None for p in periodos),
+
+                # compatibilidade extra com trechos antigos que esperem maiúsculas
+                'Matricula': row_dict.get('matricula', ''),
+                'Nome': row_dict.get('nome', ''),
+                'Data': row_dict.get('data'),
             })
 
         return panorama
-    
+
     def get_all_funcionarios(self):
         """Retorna todos os funcionários cadastrados no banco."""
         try:
@@ -1524,7 +1557,7 @@ def import_glog_txt(filepath, db_manager, logger=print):
                 "matricula": matricula,
                 "data": data_iso,
                 "minutos_totais": "00:00:00", 
-                "periodos": json.dumps(periodos_list)
+                "periodos": periodos_list
             })
             
     return new_employees_list, set(m for m, n in unique_employees)
@@ -4058,10 +4091,9 @@ class App:
 
     def load_point_viewer(self, force_reload=False):
         """Exibe os dados na tela com verificação rígida de tipos."""
-        # Garante que as datas existam ou usa o Marco Zero
         start = self.selected_start_date or date(2026, 3, 9)
         end = self.selected_end_date or date.today()
-        
+
         selected = self.cmb_filter_func.get()
         target_mat = selected.split(" - ")[0] if " - " in selected else None
 
@@ -4069,33 +4101,41 @@ class App:
             self.tree_viewer.delete(item)
 
         try:
-            # Recebe a lista de dicionários do banco
             panorama = self.db.get_point_panorama(start, end, target_mat)
-            
-            for i, row in enumerate(panorama):
-                dt_pt = datetime.strptime(row['data'], "%Y-%m-%d").strftime("%d/%m/%Y")
-                
-                # Cores dinâmicas para pontos incompletos
-                is_inc = False
-                if row['periodos']:
-                    p_json = json.loads(row['periodos'])
-                    is_inc = any(p.get('saida') is None for p in p_json)
 
-                v = (row['matricula'], row['nome'], dt_pt, "", "", "", "", row['minutos_totais'], "00:00:00", "00:00:00")
+            for i, row in enumerate(panorama):
+                data_raw = row.get('data') or row.get('Data')
+                dt_pt = datetime.strptime(data_raw, "%Y-%m-%d").strftime("%d/%m/%Y")
+
+                periodos_raw = row.get('periodos', [])
+                p_json = safe_json_load(periodos_raw)
+                is_inc = any(p.get('saida') is None for p in p_json if isinstance(p, dict))
+
+                v = (
+                    row.get('matricula') or row.get('Matricula', ''),
+                    row.get('nome') or row.get('Nome', ''),
+                    dt_pt,
+                    row.get('E1', ''),
+                    row.get('S1', ''),
+                    row.get('E2', ''),
+                    row.get('S2', ''),
+                    row.get('minutos_totais') or row.get('Carga_Horaria', "00:00:00"),
+                    row.get('Punicao', "00:00:00"),
+                    row.get('Total_Desconto', "00:00:00")
+                )
+
                 tag = 'incomplete' if is_inc else ('evenrow' if i % 2 == 0 else 'oddrow')
                 self.tree_viewer.insert("", "end", values=v, tags=(tag,))
 
-            # ATUALIZAÇÃO DOS SALDOS (Onde o erro ocorria)
             if target_mat:
                 info = self.db.get_funcionario_info(target_mat)
-                # SÓ EXECUTA .get() SE O BANCO RETORNOU DICIONÁRIO
                 if isinstance(info, dict):
                     self.lbl_saldo_bh_total.config(text=format_minutes_to_hms(info.get('banco_horas', 0)))
                     self.lbl_saldo_extras_total.config(text=str(int(info.get('extras_disponiveis', 0))))
                     self.lbl_fichado_status.config(text="Sim" if info.get('fichado') else "Não")
                     self.lbl_setor_status.config(text=str(info.get('setor', 'N/D')))
                 else:
-                    self.reset_status_labels() # Limpa se não for dicionário
+                    self.reset_status_labels()
             else:
                 self.reset_status_labels()
 
