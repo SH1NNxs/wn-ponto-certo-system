@@ -991,175 +991,163 @@ class DatabaseManager:
 
 
     def get_point_panorama(self, start_date, end_date, target_matricula=None):
-        if not start_date or not end_date: return []
-        start_date_str = start_date.isoformat() if isinstance(start_date, date) else start_date
-        end_date_str = end_date.isoformat() if isinstance(end_date, date) else end_date
-        if target_matricula and target_matricula != 'Todos':
-            funcionarios = [self.get_funcionario_info(target_matricula)]
-        else:
-            funcionarios = self.get_all_funcionarios()
-        if not funcionarios or not any(f for f in funcionarios if f): return []
+        """
+        Retorna os dados do panorama para exibição na Treeview.
+
+        REGRAS IMPORTANTES:
+        - NÃO simula saldo em memória.
+        - Lê banco_horas e extras_disponiveis DIRETAMENTE da tabela funcionarios.
+        - Respeita o período informado.
+        - Extrai E1/S1/E2/S2 do JSON 'periodos'.
+        """
         try:
-            start_dt = datetime.strptime(start_date_str, "%Y-%m-%d").date()
-            end_dt = datetime.strptime(end_date_str, "%Y-%m-%d").date()
-        except ValueError: return []
+            if not start_date or not end_date:
+                return []
 
-        matriculas_list = [f['matricula'] for f in funcionarios if f]
-        if not matriculas_list: return []
+            if isinstance(start_date, str):
+                start_date_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
+            else:
+                start_date_obj = start_date
 
-        c = self.conn.cursor()
-        placeholders = ','.join('?' for _ in matriculas_list)
+            if isinstance(end_date, str):
+                end_date_obj = datetime.strptime(end_date, "%Y-%m-%d").date()
+            else:
+                end_date_obj = end_date
 
-        # Localize este trecho na função get_point_panorama:
-        sql_todos_horas = "SELECT matricula, data, periodos, minutos_totais FROM horas_trabalhadas WHERE matricula IN ({}) AND data >= ? ORDER BY data ASC".format(placeholders)
-        params = matriculas_list + [SYSTEM_START_DATE]
-        c.execute(sql_todos_horas, params)
-        todos_os_dados_historicos = c.fetchall()
+            if end_date_obj < start_date_obj:
+                start_date_obj, end_date_obj = end_date_obj, start_date_obj
 
-        panorama_final = []
-        start_sim_dt = datetime.strptime(SYSTEM_START_DATE, "%Y-%m-%d").date()
+            c = self.conn.cursor()
 
-        for func_base in funcionarios:
-            if not func_base: continue
-            matricula = func_base['matricula']
-            info_final_real = self.get_funcionario_info(matricula)
-            is_fichado = info_final_real.get('fichado', 0) == 1
+            funcionarios = []
+            if target_matricula and str(target_matricula).strip() != "Todos":
+                matricula_limpa = str(target_matricula).split(" - ")[0].strip()
+                info = self.get_funcionario_info(matricula_limpa)
+                if info:
+                    funcionarios = [info]
+            else:
+                funcionarios = self.get_all_funcionarios()
+
+            if not funcionarios:
+                return []
+
+            matriculas_list = [f["matricula"] for f in funcionarios if f and f.get("matricula")]
+            if not matriculas_list:
+                return []
+
+            placeholders = ",".join(["?"] * len(matriculas_list))
+
+            c.execute(f"""
+                SELECT
+                    matricula,
+                    data,
+                    minutos_totais,
+                    periodos,
+                    ignorar_atraso
+                FROM horas_trabalhadas
+                WHERE matricula IN ({placeholders})
+                AND data BETWEEN ? AND ?
+                ORDER BY matricula, data
+            """, matriculas_list + [start_date_obj.isoformat(), end_date_obj.isoformat()])
+            horas_rows = c.fetchall()
 
             work_map = {}
-            dados_func = [r for r in todos_os_dados_historicos if r['matricula'] == matricula]
-            for row in dados_func:
-                minutos_trabalhados = parse_hhmm_to_minutes(row['minutos_totais'])
-                work_map[row['data']] = {'minutos': minutos_trabalhados, 'periodos': row['periodos']}
+            for row in horas_rows:
+                key = (row["matricula"], row["data"])
+                work_map[key] = dict(row)
 
-            saldo_bh_simulado = info_final_real.get('banco_horas_inicial', 0)
-            saldo_extras_simulado = info_final_real.get('extras_disponiveis_inicial', 0)
-            historico_simulado = {}
+            panorama_final = []
 
-            current_sim_iter = start_sim_dt
-            
-            yesterday = SYSTEM_CURRENT_DATE - timedelta(days=1)
-            sim_end_dt = max(end_dt, yesterday) # Simula até o fim do período ou ontem
+            for func in funcionarios:
+                matricula = func["matricula"]
+                info_real = self.get_funcionario_info(matricula)
 
-            while current_sim_iter <= sim_end_dt:
-                data_str = current_sim_iter.isoformat() # Variável usada dentro do loop
-                bh_anterior_simulado = saldo_bh_simulado
-                extras_anterior_simulado = saldo_extras_simulado
+                current_date_iter = start_date_obj
+                while current_date_iter <= end_date_obj:
+                    data_str = current_date_iter.isoformat()
 
-                if current_sim_iter == SYSTEM_CURRENT_DATE:
-                    historico_simulado[data_str] = {
-                        'bh_anterior': bh_anterior_simulado,
-                        'bh_saldo': saldo_bh_simulado, # Saldo final de ontem
-                        'extras_anterior': extras_anterior_simulado,
-                        'extras_saldo': saldo_extras_simulado # Saldo final de ontem
+                    row = work_map.get((matricula, data_str))
+                    e1 = ""
+                    s1 = ""
+                    e2 = ""
+                    s2 = ""
+                    carga_h = "00:00:00"
+                    total_desconto = "00:00:00"
+                    is_incomplete = False
+
+                    if row:
+                        carga_h = row.get("minutos_totais") or "00:00:00"
+
+                        periodos_json = row.get("periodos") or "[]"
+                        try:
+                            periodos = json.loads(periodos_json)
+                        except Exception:
+                            periodos = []
+
+                        horarios_extraidos = []
+                        desconto_total_min = 0
+
+                        for p in periodos:
+                            entrada_str = p.get("entrada")
+                            saida_str = p.get("saida")
+                            deducao_str = p.get("deducao_minutos", "00:00:00")
+
+                            desconto_total_min += parse_hhmm_to_minutes(deducao_str)
+
+                            if entrada_str:
+                                try:
+                                    entrada_dt = try_parse_datetime(entrada_str)
+                                    horarios_extraidos.append(entrada_dt.strftime("%H:%M") if entrada_dt else "")
+                                except Exception:
+                                    horarios_extraidos.append("")
+
+                            if saida_str:
+                                try:
+                                    saida_dt = try_parse_datetime(saida_str)
+                                    horarios_extraidos.append(saida_dt.strftime("%H:%M") if saida_dt else "")
+                                except Exception:
+                                    horarios_extraidos.append("")
+                            else:
+                                is_incomplete = True
+
+                        if len(horarios_extraidos) > 0:
+                            e1 = horarios_extraidos[0]
+                        if len(horarios_extraidos) > 1:
+                            s1 = horarios_extraidos[1]
+                        if len(horarios_extraidos) > 2:
+                            e2 = horarios_extraidos[2]
+                        if len(horarios_extraidos) > 3:
+                            s2 = horarios_extraidos[3]
+
+                        total_desconto = format_minutes_to_hms(desconto_total_min)
+
+                    ponto_dict = {
+                        "Matricula": matricula,
+                        "Nome": info_real.get("nome", ""),
+                        "Data": data_str,
+                        "E1": e1,
+                        "S1": s1,
+                        "E2": e2,
+                        "S2": s2,
+                        "Carga_Horaria": carga_h,
+                        "Punicao": "00:00:00",
+                        "Total_Desconto": total_desconto,
+                        "BH_Anterior": "--",
+                        "Extras_Anterior": "--",
+                        "BH_Saldo": format_minutes_to_hms(info_real.get("banco_horas", 0) or 0),
+                        "Extras_Disp": str(int(info_real.get("extras_disponiveis", 0) or 0)),
+                        "is_incomplete": is_incomplete
                     }
-                    current_sim_iter += timedelta(days=1)
-                    continue # Pula o resto do cálculo
 
-                expected_minutes = self.get_expected_daily_minutes(data_str, is_fichado, matricula)
+                    panorama_final.append(ponto_dict)
+                    current_date_iter += timedelta(days=1)
 
-                minutos_trabalhados_dia = work_map.get(data_str, {}).get('minutos', 0)
-                excedente_dia = minutos_trabalhados_dia - expected_minutes
-                saldo_bh_simulado += excedente_dia
+            panorama_final.sort(key=lambda x: (x["Nome"], x["Data"]))
+            return panorama_final
 
-                while saldo_bh_simulado >= MINUTOS_UNIDADE_EXTRA:
-                    saldo_bh_simulado -= MINUTOS_UNIDADE_EXTRA
-                    saldo_extras_simulado += 1
-                while saldo_bh_simulado < 0 and saldo_extras_simulado > 0:
-                    saldo_bh_simulado += MINUTOS_UNIDADE_EXTRA
-                    saldo_extras_simulado -= 1
-
-                punicao_do_dia = self.get_total_punishment_minutes_for_day(matricula, data_str)
-                if punicao_do_dia > 0:
-                    saldo_bh_simulado -= punicao_do_dia
-                    while saldo_bh_simulado < 0 and saldo_extras_simulado > 0:
-                        saldo_bh_simulado += MINUTOS_UNIDADE_EXTRA
-                        saldo_extras_simulado -= 1
-
-                historico_simulado[data_str] = {
-                    'bh_anterior': bh_anterior_simulado,
-                    'bh_saldo': saldo_bh_simulado,
-                    'extras_anterior': extras_anterior_simulado,
-                    'extras_saldo': saldo_extras_simulado
-                }
-                current_sim_iter += timedelta(days=1)
-
-            current_date_iter = start_dt
-            while current_date_iter <= end_dt:
-                data_str = current_date_iter.isoformat() # Variável usada dentro do loop
-
-                dados_do_dia = work_map.get(data_str)
-                simulacao_do_dia = historico_simulado.get(data_str)
-
-                if not simulacao_do_dia:
-                    if current_date_iter < start_sim_dt:
-                        simulacao_do_dia = {
-                            'bh_anterior': info_final_real.get('banco_horas_inicial', 0),
-                            'bh_saldo': info_final_real.get('banco_horas_inicial', 0),
-                            'extras_anterior': info_final_real.get('extras_disponiveis_inicial', 0),
-                            'extras_saldo': info_final_real.get('extras_disponiveis_inicial', 0)
-                        }
-                    else:
-                        last_sim_date = max((d for d in historico_simulado if d < data_str), default=None)
-                        if last_sim_date:
-                            simulacao_do_dia = {
-                                'bh_anterior': historico_simulado[last_sim_date]['bh_saldo'],
-                                'bh_saldo': historico_simulado[last_sim_date]['bh_saldo'],
-                                'extras_anterior': historico_simulado[last_sim_date]['extras_saldo'],
-                                'extras_saldo': historico_simulado[last_sim_date]['extras_saldo']
-                            }
-                        else:
-                            simulacao_do_dia = {
-                                'bh_anterior': info_final_real.get('banco_horas_inicial', 0),
-                                'bh_saldo': info_final_real.get('banco_horas_inicial', 0),
-                                'extras_anterior': info_final_real.get('extras_disponiveis_inicial', 0),
-                                'extras_saldo': info_final_real.get('extras_disponiveis_inicial', 0)
-                            }
-
-                carga_horaria_dia_str, total_desconto_penalidade_str, horarios = "00:00:00", "00:00:00", []
-                is_incomplete_day = False
-
-                if dados_do_dia:
-                    carga_horaria_dia_str_temp, total_desconto_penalidade_str_temp = self._get_daily_summary_for_display(matricula, data_str)
-                    carga_horaria_dia_str = carga_horaria_dia_str_temp
-                    total_desconto_penalidade_str = total_desconto_penalidade_str_temp
-
-                    try:
-                        periods_json = json.loads(dados_do_dia['periodos']) if dados_do_dia['periodos'] else []
-                        for p in periods_json:
-                             entrada_str = p.get('entrada')
-                             saida_str = p.get('saida')
-                             if entrada_str:
-                                 horarios.append(datetime.strptime(entrada_str, '%Y-%m-%d %H:%M:%S').strftime('%H:%M'))
-                             if saida_str:
-                                 horarios.append(datetime.strptime(saida_str, '%Y-%m-%d %H:%M:%S').strftime('%H:%M'))
-                             if entrada_str and not saida_str:
-                                 is_incomplete_day = True
-                    except Exception as e:
-                        print(f"Erro ao processar períodos para {matricula} em {data_str}: {e}")
-                        pass
-
-                ponto_dict = {
-                    'Matricula': matricula, 'Nome': info_final_real['nome'], 'Data': data_str,
-                    'E1': '', 'S1': '', 'E2': '', 'S2': '',
-                    'Carga_Horaria': carga_horaria_dia_str, 
-                    'Total_Desconto': total_desconto_penalidade_str,
-                    'BH_Anterior': format_minutes_to_hms(simulacao_do_dia['bh_anterior']),
-                    'Extras_Anterior': str(int(simulacao_do_dia['extras_anterior'])), # <-- LINHA ADICIONADA
-                    'BH_Saldo': format_minutes_to_hms(simulacao_do_dia['bh_saldo']),
-                    'Extras_Disp': str(int(simulacao_do_dia['extras_saldo'])),
-                    'is_incomplete': is_incomplete_day
-                }
-
-                if len(horarios) >= 1: ponto_dict['E1'] = horarios[0]
-                if len(horarios) >= 2: ponto_dict['S1'] = horarios[1]
-                if len(horarios) >= 3: ponto_dict['E2'] = horarios[2]
-                if len(horarios) >= 4: ponto_dict['S2'] = horarios[3]
-                panorama_final.append(ponto_dict)
-
-                current_date_iter += timedelta(days=1)
-
-        panorama_final.sort(key=lambda x: (x['Nome'], x['Data']))
-        return panorama_final
+        except Exception as e:
+            print(f"Erro em get_point_panorama: {e}")
+            return []
     
     def get_worked_days_in_range(self, matricula, start_date, end_date):
         c = self.conn.cursor()
@@ -1252,101 +1240,164 @@ class DatabaseManager:
             return False
 
 
-    def recalculate_full_balance_for_employee(self, matricula):
-        c = self.conn.cursor()
-        func_info = self.get_funcionario_info(matricula)
-        if not func_info: return
+    def get_point_panorama(self, start_date, end_date, target_matricula=None):
+        """
+        Retorna os dados do panorama para exibição na Treeview.
 
-        is_fichado = func_info.get('fichado', 0) == 1
-        saldo_bh = func_info.get('banco_horas_inicial', 0)
-        saldo_extras = func_info.get('extras_disponiveis_inicial', 0)
-
-        # 1. Soma saldo gerado pelo trabalho dia a dia
-        c.execute("SELECT data, minutos_totais FROM horas_trabalhadas WHERE matricula=? AND data >= ? ORDER BY data", (matricula, SYSTEM_START_DATE))
-        work_map = {r['data']: parse_hhmm_to_minutes(r['minutos_totais']) for r in c.fetchall()}
-
+        REGRAS IMPORTANTES:
+        - NÃO simula saldo em memória.
+        - Lê banco_horas e extras_disponiveis DIRETAMENTE da tabela funcionarios.
+        - Respeita o período informado.
+        - Extrai E1/S1/E2/S2 do JSON 'periodos'.
+        """
         try:
-            start_dt = datetime.strptime(SYSTEM_START_DATE, "%Y-%m-%d").date()
-            end_dt = SYSTEM_CURRENT_DATE - timedelta(days=1)
-        except: return
+            if not start_date or not end_date:
+                return []
 
-        if start_dt <= end_dt:
-            curr = start_dt
-            while curr <= end_dt:
-                d_str = curr.isoformat()
-                trabalhado = work_map.get(d_str, 0)
+            if isinstance(start_date, str):
+                start_date_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
+            else:
+                start_date_obj = start_date
 
-                # --- Lógica Não Fichado ---
-                if not is_fichado and trabalhado == 0:
-                    esperado = 0 
-                else:
-                    # get_expected_daily_minutes JÁ subtrai o abono da expectativa.
-                    esperado = self.get_expected_daily_minutes(d_str, is_fichado, matricula)
+            if isinstance(end_date, str):
+                end_date_obj = datetime.strptime(end_date, "%Y-%m-%d").date()
+            else:
+                end_date_obj = end_date
 
-                # Saldo do dia
-                saldo_bh += (trabalhado - esperado)
+            if end_date_obj < start_date_obj:
+                start_date_obj, end_date_obj = end_date_obj, start_date_obj
 
-                # Normalização diária (converte excesso de BH para Extras)
-                while saldo_bh >= MINUTOS_UNIDADE_EXTRA:
-                    saldo_bh -= MINUTOS_UNIDADE_EXTRA
-                    saldo_extras += 1
-                while saldo_bh < 0 and saldo_extras > 0:
-                    saldo_bh += MINUTOS_UNIDADE_EXTRA
-                    saldo_extras -= 1
+            c = self.conn.cursor()
 
-                curr += timedelta(days=1)
+            funcionarios = []
+            if target_matricula and str(target_matricula).strip() != "Todos":
+                matricula_limpa = str(target_matricula).split(" - ")[0].strip()
+                info = self.get_funcionario_info(matricula_limpa)
+                if info:
+                    funcionarios = [info]
+            else:
+                funcionarios = self.get_all_funcionarios()
 
-        # 2. Subtrai Punições
-        c.execute("SELECT SUM(minutos_descontados) as t FROM punicoes WHERE matricula=? AND data_punicao >= ?", (matricula, SYSTEM_START_DATE))
-        total_punicoes = c.fetchone()['t']
-        saldo_bh -= (total_punicoes or 0)
+            if not funcionarios:
+                return []
 
-        # Normaliza após punições
-        while saldo_bh < 0 and saldo_extras > 0: saldo_bh += MINUTOS_UNIDADE_EXTRA; saldo_extras -= 1
+            matriculas_list = [f["matricula"] for f in funcionarios if f and f.get("matricula")]
+            if not matriculas_list:
+                return []
 
-        # 3. Subtrai Pagamentos (AQUI ESTAVA O ERRO: Agora lê BH e Extras)
-        c.execute("SELECT periodos_antigos, periodos_novos FROM log_edicoes WHERE matricula=? AND justificativa='Pagamento/Dedução Saldo'", (matricula,))
-        for log in c.fetchall():
-            try:
-                # Lê Extras
-                ant_extra = re.search(r'Extras: (\-?\d+)', log['periodos_antigos'])
-                nov_extra = re.search(r'Extras: (\-?\d+)', log['periodos_novos'])
-                if ant_extra and nov_extra: 
-                    diff_extras = int(ant_extra.group(1)) - int(nov_extra.group(1))
-                    saldo_extras -= diff_extras
+            placeholders = ",".join(["?"] * len(matriculas_list))
 
-                # Lê Banco de Horas (NOVO)
-                ant_bh = re.search(r'BH: ([\-\d:]+)', log['periodos_antigos'])
-                nov_bh = re.search(r'BH: ([\-\d:]+)', log['periodos_novos'])
-                if ant_bh and nov_bh:
-                    # Converte HH:MM para minutos
-                    min_ant = parse_hhmm_to_minutes(ant_bh.group(1))
-                    min_nov = parse_hhmm_to_minutes(nov_bh.group(1))
-                    diff_bh = min_ant - min_nov
-                    saldo_bh -= diff_bh
-                    
-            except Exception as e: 
-                print(f"Erro parse log recálculo: {e}")
-                pass
+            c.execute(f"""
+                SELECT
+                    matricula,
+                    data,
+                    minutos_totais,
+                    periodos,
+                    ignorar_atraso
+                FROM horas_trabalhadas
+                WHERE matricula IN ({placeholders})
+                AND data BETWEEN ? AND ?
+                ORDER BY matricula, data
+            """, matriculas_list + [start_date_obj.isoformat(), end_date_obj.isoformat()])
+            horas_rows = c.fetchall()
 
-        # 4. Normalização Final (Garante consistência)
-        # Se sobrar muito BH positivo, vira extra
-        while saldo_bh >= MINUTOS_UNIDADE_EXTRA:
-            saldo_bh -= MINUTOS_UNIDADE_EXTRA
-            saldo_extras += 1
-        
-        # Se BH negativo e tem extra, queima extra para cobrir
-        while saldo_bh < 0 and saldo_extras > 0:
-            saldo_bh += MINUTOS_UNIDADE_EXTRA
-            saldo_extras -= 1
+            work_map = {}
+            for row in horas_rows:
+                key = (row["matricula"], row["data"])
+                work_map[key] = dict(row)
 
-        # Se Saldo de Extras ficar negativo, converte dívida de extra em dívida de BH (opcional, mas mantém lógica limpa)
-        while saldo_extras < 0: 
-            saldo_extras += 1
-            saldo_bh -= MINUTOS_UNIDADE_EXTRA
+            panorama_final = []
 
-        self.conn.execute("UPDATE funcionarios SET banco_horas=?, extras_disponiveis=? WHERE matricula=?", (saldo_bh, saldo_extras, matricula))
-        self.conn.commit()
+            for func in funcionarios:
+                matricula = func["matricula"]
+                info_real = self.get_funcionario_info(matricula)
+
+                current_date_iter = start_date_obj
+                while current_date_iter <= end_date_obj:
+                    data_str = current_date_iter.isoformat()
+
+                    row = work_map.get((matricula, data_str))
+                    e1 = ""
+                    s1 = ""
+                    e2 = ""
+                    s2 = ""
+                    carga_h = "00:00:00"
+                    total_desconto = "00:00:00"
+                    is_incomplete = False
+
+                    if row:
+                        carga_h = row.get("minutos_totais") or "00:00:00"
+
+                        periodos_json = row.get("periodos") or "[]"
+                        try:
+                            periodos = json.loads(periodos_json)
+                        except Exception:
+                            periodos = []
+
+                        horarios_extraidos = []
+                        desconto_total_min = 0
+
+                        for p in periodos:
+                            entrada_str = p.get("entrada")
+                            saida_str = p.get("saida")
+                            deducao_str = p.get("deducao_minutos", "00:00:00")
+
+                            desconto_total_min += parse_hhmm_to_minutes(deducao_str)
+
+                            if entrada_str:
+                                try:
+                                    entrada_dt = try_parse_datetime(entrada_str)
+                                    horarios_extraidos.append(entrada_dt.strftime("%H:%M") if entrada_dt else "")
+                                except Exception:
+                                    horarios_extraidos.append("")
+
+                            if saida_str:
+                                try:
+                                    saida_dt = try_parse_datetime(saida_str)
+                                    horarios_extraidos.append(saida_dt.strftime("%H:%M") if saida_dt else "")
+                                except Exception:
+                                    horarios_extraidos.append("")
+                            else:
+                                is_incomplete = True
+
+                        if len(horarios_extraidos) > 0:
+                            e1 = horarios_extraidos[0]
+                        if len(horarios_extraidos) > 1:
+                            s1 = horarios_extraidos[1]
+                        if len(horarios_extraidos) > 2:
+                            e2 = horarios_extraidos[2]
+                        if len(horarios_extraidos) > 3:
+                            s2 = horarios_extraidos[3]
+
+                        total_desconto = format_minutes_to_hms(desconto_total_min)
+
+                    ponto_dict = {
+                        "Matricula": matricula,
+                        "Nome": info_real.get("nome", ""),
+                        "Data": data_str,
+                        "E1": e1,
+                        "S1": s1,
+                        "E2": e2,
+                        "S2": s2,
+                        "Carga_Horaria": carga_h,
+                        "Punicao": "00:00:00",
+                        "Total_Desconto": total_desconto,
+                        "BH_Anterior": "--",
+                        "Extras_Anterior": "--",
+                        "BH_Saldo": format_minutes_to_hms(info_real.get("banco_horas", 0) or 0),
+                        "Extras_Disp": str(int(info_real.get("extras_disponiveis", 0) or 0)),
+                        "is_incomplete": is_incomplete
+                    }
+
+                    panorama_final.append(ponto_dict)
+                    current_date_iter += timedelta(days=1)
+
+            panorama_final.sort(key=lambda x: (x["Nome"], x["Data"]))
+            return panorama_final
+
+        except Exception as e:
+            print(f"Erro em get_point_panorama: {e}")
+            return []
 
     
     def reprocess_daily_data(self, matricula):
@@ -3927,56 +3978,91 @@ class App:
 
     def on_recalculate_and_refresh(self):
         """
-        Força o reprocessamento dos dias e depois o recálculo do saldo.
+        Reprocessa os dias do funcionário selecionado (ou de todos),
+        recalcula o saldo integral, força gravação no banco e atualiza a interface.
         """
-        self.append_log("Iniciando reprocessamento completo...")
-        target_matricula_str = self.cmb_filter_func.get()
-        recalc_errors = 0
+        try:
+            self.append_log("Iniciando recálculo forçado e sincronização de saldos...")
 
-        if target_matricula_str == "Todos":
-            if not messagebox.askyesno("Confirmar Recálculo Total", "Isso irá reprocessar TODOS os dias de TODOS os funcionários.\nIsso pode demorar alguns segundos.\n\nDeseja continuar?"):
-                self.append_log("Cancelado pelo usuário.")
-                return
-            all_employees = self.db.get_all_funcionarios()
-            self.append_log(f"Processando {len(all_employees)} funcionários...")
-            for emp in all_employees:
-                try:
-                    # 1. Reprocessa os dias (corrige carga horária diária)
-                    self.db.reprocess_daily_data(emp['matricula'])
-                    # 2. Recalcula o saldo total (soma os novos dias)
-                    self.db.recalculate_full_balance_for_employee(emp['matricula'])
-                except Exception as e:
-                   self.append_log(f"ERRO em {emp['matricula']}: {e}")
-                   recalc_errors += 1
-        else:
-            try:
-                target_matricula = target_matricula_str.split(" - ")[0]
-                self.append_log(f"Reprocessando dias de {target_matricula_str}...")
-                
-                # 1. Reprocessa os dias (corrige carga horária diária - ex: chegada cedo)
-                self.db.reprocess_daily_data(target_matricula)
-                
-                self.append_log(f"Recalculando saldo total de {target_matricula_str}...")
-                # 2. Recalcula o saldo total
-                self.db.recalculate_full_balance_for_employee(target_matricula)
-                
-            except IndexError:
-                self.append_log("ERRO: Nenhum funcionário selecionado.")
-                recalc_errors += 1
-            except Exception as e:
-                self.append_log(f"ERRO geral: {e}")
-                recalc_errors += 1
+            target_str = (self.cmb_filter_func.get() or "").strip()
+            total_processados = 0
+            total_erros = 0
 
-        if recalc_errors == 0:
-            self.append_log("Processo concluído com sucesso.")
-            messagebox.showinfo("Concluído", "Dias reprocessados e saldos atualizados com sucesso!")
-        else:
-             self.append_log(f"Concluído com {recalc_errors} erro(s).")
-             messagebox.showwarning("Atenção", "Ocorreram erros durante o processo. Verifique o log.")
+            if not target_str or target_str == "Todos":
+                funcionarios = self.db.get_all_funcionarios()
+                if not funcionarios:
+                    messagebox.showwarning("Aviso", "Nenhum funcionário encontrado para recalcular.")
+                    return
 
-        # Atualiza a visualização
-        self.load_point_viewer(force_reload=True)
-        self._update_calendar_tags()
+                for emp in funcionarios:
+                    matricula = emp["matricula"]
+                    try:
+                        self.append_log(f"Reprocessando dias de {matricula}...")
+                        self.db.reprocess_daily_data(matricula)
+
+                        self.append_log(f"Recalculando saldo total de {matricula}...")
+                        ok = self.db.recalculate_full_balance_for_employee(matricula)
+                        if not ok:
+                            raise Exception("Recalculate retornou False")
+
+                        info_final = self.db.get_funcionario_info(matricula)
+                        self.append_log(
+                            f"OK {matricula} | "
+                            f"BH: {format_minutes_to_hms(info_final.get('banco_horas', 0) or 0)} | "
+                            f"Extras: {int(info_final.get('extras_disponiveis', 0) or 0)}"
+                        )
+                        total_processados += 1
+
+                    except Exception as e:
+                        total_erros += 1
+                        self.append_log(f"ERRO ao recalcular {matricula}: {e}")
+
+                if total_erros == 0:
+                    msg = f"Saldos de {total_processados} funcionário(s) atualizados com sucesso."
+                    self.append_log("Recálculo concluído com sucesso.")
+                    messagebox.showinfo("Sucesso", msg)
+                else:
+                    msg = (
+                        f"Recálculo concluído com alertas.\n\n"
+                        f"Processados com sucesso: {total_processados}\n"
+                        f"Erros: {total_erros}\n\n"
+                        f"Verifique o log para detalhes."
+                    )
+                    self.append_log("Recálculo concluído com erros parciais.")
+                    messagebox.showwarning("Atenção", msg)
+
+            else:
+                matricula = target_str.split(" - ")[0].strip()
+
+                self.append_log(f"Reprocessando dias de {matricula}...")
+                self.db.reprocess_daily_data(matricula)
+
+                self.append_log(f"Recalculando saldo total de {matricula}...")
+                ok = self.db.recalculate_full_balance_for_employee(matricula)
+                if not ok:
+                    raise Exception("Recalculate retornou False")
+
+                info_final = self.db.get_funcionario_info(matricula)
+                self.append_log(
+                    f"OK {matricula} | "
+                    f"BH: {format_minutes_to_hms(info_final.get('banco_horas', 0) or 0)} | "
+                    f"Extras: {int(info_final.get('extras_disponiveis', 0) or 0)}"
+                )
+
+                self.append_log("Recálculo concluído com sucesso.")
+                messagebox.showinfo(
+                    "Sucesso",
+                    f"Saldos de {target_str} atualizados!\n\n"
+                    f"BH: {format_minutes_to_hms(info_final.get('banco_horas', 0) or 0)}\n"
+                    f"Extras: {int(info_final.get('extras_disponiveis', 0) or 0)}"
+                )
+
+            self.load_point_viewer(force_reload=True)
+            self._update_calendar_tags()
+
+        except Exception as e:
+            self.append_log(f"ERRO geral no recálculo: {e}")
+            messagebox.showerror("Erro", f"Falha ao recalcular saldos.\n\nDetalhes: {e}")
 
 
     def setup_point_viewer(self, parent_frame):
@@ -4169,361 +4255,179 @@ class App:
 
     def load_point_viewer(self, force_reload=False):
         if self.unsaved_edits and not force_reload:
-            if not messagebox.askyesno("Atualizar", "Alterações não salvas. Continuar?"): return
+            if not messagebox.askyesno("Atualizar", "Alterações não salvas serão perdidas. Continuar?"): return
             self.unsaved_edits = {}
-        if hasattr(self, 'holiday_listbox'): self.holiday_listbox.delete(0, tk.END)
-        if hasattr(self, 'punishment_listbox'): self.punishment_listbox.delete(0, tk.END)
-        if hasattr(self, 'lbl_total_punishments'): self.lbl_total_punishments.config(text="Total Punições: --")
+            
+        start_date = self.selected_start_date
+        end_date = self.selected_end_date
+        selected_func = self.cmb_filter_func.get()
+        target_matricula = selected_func.split(" - ")[0] if selected_func != "Todos" else None
 
-        start_date = self.selected_start_date; end_date = self.selected_end_date
-
-        if not start_date or not end_date:
-            [self.tree_viewer.delete(i) for i in self.tree_viewer.get_children()]
-            self.lbl_saldo_bh_total.config(text="--:--:--")
-            self.lbl_saldo_extras_total.config(text="--")
-            self.lbl_fichado_status.config(text="--")
-            self.lbl_setor_status.config(text="--")
-            for l in [getattr(self, 'holiday_listbox', None), getattr(self, 'punishment_listbox', None)]:
-                if l: l.delete(0, tk.END)
-            for lbl in [getattr(self, 'lbl_total_punishments', None)]:
-                if lbl: lbl.config(text="Total Punições: --")
-            return
-
-        selected_func = self.cmb_filter_func.get(); target_matricula = selected_func.split(" - ")[0] if selected_func != "Todos" else None; [self.tree_viewer.delete(i) for i in self.tree_viewer.get_children()]
+        # Limpa visualização
+        [self.tree_viewer.delete(i) for i in self.tree_viewer.get_children()]
+        
+        if not start_date or not end_date: return
 
         try:
             panorama_data = self.db.get_point_panorama(start_date, end_date, target_matricula)
-        except NameError as ne:
-             error_msg = f"Erro ao gerar panorama (NameError): {ne}. Verifique a função 'get_expected_daily_minutes'."
-             self.append_log(f"ERRO: {error_msg}")
-             messagebox.showerror("Erro de Cálculo", error_msg)
-             [self.tree_viewer.delete(i) for i in self.tree_viewer.get_children()]
-             panorama_data = []
+            
+            for i, item in enumerate(panorama_data):
+                data_db_str = item['Data']
+                data_ptbr = datetime.strptime(data_db_str, "%Y-%m-%d").strftime("%d/%m/%Y")
+                punicao_min = self.db.get_total_punishment_minutes_for_day(item['Matricula'], data_db_str)
+                
+                values = (
+                    item['Matricula'], item['Nome'], data_ptbr, 
+                    item['E1'], item['S1'], item['E2'], item['S2'], 
+                    item['Carga_Horaria'], format_minutes_to_hms(punicao_min), item['Total_Desconto']
+                )
+                
+                tags = ['evenrow' if i % 2 == 0 else 'oddrow']
+                if item.get('is_incomplete'): tags.append('incomplete')
+                
+                self.tree_viewer.insert("", "end", values=values, iid=(item['Matricula'], item['Data']), tags=tuple(tags))
+
+            # ATUALIZA AS LABELS SUPERIORES DIRETAMENTE DO BANCO
+            if target_matricula:
+                info = self.db.get_funcionario_info(target_matricula)
+                self.lbl_saldo_bh_total.config(text=format_minutes_to_hms(info['banco_horas']))
+                self.lbl_saldo_extras_total.config(text=str(int(info['extras_disponiveis'])))
+                self.lbl_fichado_status.config(text="Sim" if info['fichado'] == 1 else "Não")
+                self.lbl_setor_status.config(text=info['setor'])
+            else:
+                self.lbl_saldo_bh_total.config(text="--:--:--")
+                self.lbl_saldo_extras_total.config(text="--")
+
         except Exception as e:
-             error_msg = f"Erro inesperado ao gerar panorama: {e}"
-             self.append_log(f"ERRO: {error_msg}")
-             messagebox.showerror("Erro Inesperado", error_msg)
-             [self.tree_viewer.delete(i) for i in self.tree_viewer.get_children()]
-             panorama_data = []
-
-
-        last_item = None
-        for i, item in enumerate(panorama_data):
-            data_db_str = item['Data']; data_ptbr = datetime.strptime(data_db_str, "%Y-%m-%d").strftime("%d/%m/%Y") if data_db_str else data_db_str
-            punicao_minutos = self.db.get_total_punishment_minutes_for_day(item['Matricula'], data_db_str); punicao_hms = format_minutes_to_hms(punicao_minutos) if punicao_minutos > 0 else "00:00:00"
-
-            values = (item['Matricula'], item['Nome'], data_ptbr, item['E1'], item['S1'], item['E2'], item['S2'], item['Carga_Horaria'], punicao_hms, item['Total_Desconto'])
-            
-            tags_para_linha = []
-            tags_para_linha.append('evenrow' if i % 2 == 0 else 'oddrow')
-            if item.get('is_incomplete', False):
-                tags_para_linha.append('incomplete')
-            
-            self.tree_viewer.insert("", "end", values=values, iid=(item['Matricula'], item['Data']), tags=tuple(tags_para_linha))
-            
-            last_item = item
-
-        if target_matricula:
-            func_info = self.db.get_funcionario_info(target_matricula)
-
-            self.lbl_saldo_bh_total.config(text=format_minutes_to_hms(func_info.get('banco_horas', 0)))
-            self.lbl_saldo_extras_total.config(text=str(int(func_info.get('extras_disponiveis', 0))))
-
-            fichado_val = func_info.get('fichado', 0); fichado_str = "Sim" if fichado_val == 1 else "Não"; setor_str = func_info.get('setor', 'N/D'); self.lbl_fichado_status.config(text=fichado_str); self.lbl_setor_status.config(text=setor_str)
-        else:
-            self.lbl_saldo_bh_total.config(text="--:--:--"); self.lbl_saldo_extras_total.config(text="--"); self.lbl_fichado_status.config(text="--"); self.lbl_setor_status.config(text="--")
-
-        if start_date and end_date and hasattr(self, 'holiday_listbox'):
-            holidays = self.db.get_holidays_in_range(start_date, end_date); [self.holiday_listbox.insert(tk.END, f"{datetime.strptime(h['data'], '%Y-%m-%d').strftime('%d/%m/%Y')} - {h['descricao']} ({h['tipo']})") for h in holidays if h.get('data')]
-
-        if target_matricula and start_date and end_date and hasattr(self, 'punishment_listbox'):
-            punishments = self.db.get_punishments_in_range(target_matricula, start_date, end_date); total_punishments = len(punishments); self.lbl_total_punishments.config(text=f"Total Punições: {total_punishments}"); [self.punishment_listbox.insert(tk.END, f"{datetime.strptime(p['data_punicao'], '%Y-%m-%d').strftime('%d/%m/%Y')} - {format_minutes_to_hms(p['minutos_descontados'])} - {p.get('motivo','Sem motivo')}") for p in punishments if p.get('data_punicao')]
-        elif hasattr(self, 'punishment_listbox'):
-            self.punishment_listbox.delete(0, tk.END); self.lbl_total_punishments.config(text="Total Punições: --")
-
-    # --- INÍCIO DA CORREÇÃO DE INDENTAÇÃO ---
-    # (Todas as funções abaixo foram indentadas para pertencer à classe App)
+            self.append_log(f"Erro ao carregar panorama: {e}")
     
     def on_export_panorama(self):
-            selected_func_str = self.cmb_filter_func.get()
-            start_date = self.selected_start_date
-            end_date = self.selected_end_date
+        """
+        Gera o PDF do espelho de ponto incluindo a sugestão inteligente de saída para o sábado
+        baseada no saldo atual de banco de horas.
+        """
+        selected_func_str = self.cmb_filter_func.get()
+        start_date = self.selected_start_date
+        end_date = self.selected_end_date
 
-            if not start_date or not end_date:
-                messagebox.showerror("Erro", "Selecione um período válido (Data Início e Fim).")
+        if not start_date or not end_date:
+            messagebox.showerror("Erro", "Selecione um período válido (Data Início e Fim).")
+            return
+
+        if not selected_func_str or selected_func_str == "Todos":
+            messagebox.showerror("Erro", "Selecione um funcionário para gerar o espelho de ponto.")
+            return
+
+        target_matricula = selected_func_str.split(" - ")[0]
+        nome_func = " ".join(selected_func_str.split(" - ")[1:])
+
+        try:
+            panorama_data = self.db.get_point_panorama(start_date, end_date, target_matricula)
+            if not panorama_data:
+                messagebox.showinfo("Aviso", "Não há dados para exportar.")
                 return
-
-            if not selected_func_str or selected_func_str == "Todos":
-                messagebox.showerror("Erro", "Selecione um funcionário (não 'Todos') para gerar um espelho de ponto.")
-                return
-
-            target_matricula = selected_func_str.split(" - ")[0]
-            nome_func = " ".join(selected_func_str.split(" - ")[1:])
-
-            # --- Lógica de Cálculo (sem alteração) ---
-            try:
-                panorama_data = self.db.get_point_panorama(start_date, end_date, target_matricula)
-                if not panorama_data:
-                    messagebox.showinfo("Aviso", "Não há dados para exportar no panorama.")
-                    return
-            except Exception as e:
-                messagebox.showerror("Erro", f"Não foi possível buscar os dados do panorama: {e}")
-                return
-
-            total_trabalhado_min = 0
-            total_exigido_min = 0
-            func_info_calc = self.db.get_funcionario_info(target_matricula)
-            is_fichado_calc = func_info_calc.get('fichado', 0) == 1
-            setor_calc = func_info_calc.get('setor', 'N/D')
             
-            current_date_iter = start_date
-            while current_date_iter <= end_date:
-                data_str = current_date_iter.isoformat()
-                expected_minutes = 0
-                weekday = current_date_iter.weekday()
-                
-                if weekday == 6: # 1. Domingo
-                    expected_minutes = 0
-                else:
-                    is_holiday_today = self.db.is_holiday(data_str)
-                    if is_fichado_calc and is_holiday_today:
-                        expected_minutes = 0
-                    else:
-                        if weekday < 5: # Seg-Sex
-                            expected_minutes = MINUTOS_JORNADA_SEG_SEX # 480
-                        elif weekday == 5: # Sab
-                            expected_minutes = MINUTOS_JORNADA_SABADO # 240
-                
-                total_exigido_min += expected_minutes
-                current_date_iter += timedelta(days=1)
+            func_info = self.db.get_funcionario_info(target_matricula)
+            is_fichado = func_info.get('fichado', 0) == 1
+            saldo_bh_atual_min = func_info.get('banco_horas', 0)
+        except Exception as e:
+            messagebox.showerror("Erro", f"Falha ao coletar dados: {e}")
+            return
+
+        total_trabalhado_min = 0
+        total_exigido_min = 0
+        current_date_iter = start_date
+        while current_date_iter <= end_date:
+            data_str = current_date_iter.isoformat()
+            if current_date_iter.weekday() != 6: # Não é domingo
+                if not (is_fichado and self.db.is_holiday(data_str)):
+                    total_exigido_min += MINUTOS_JORNADA_SABADO if current_date_iter.weekday() == 5 else MINUTOS_JORNADA_SEG_SEX
+            current_date_iter += timedelta(days=1)
+        
+        for item in panorama_data:
+            total_trabalhado_min += parse_hhmm_to_minutes(item.get('Carga_Horaria', '00:00:00'))
+
+        filepath = filedialog.asksaveasfilename(
+            defaultextension=".pdf",
+            filetypes=[("PDF files", "*.pdf")],
+            title="Salvar Espelho de Ponto",
+            initialfile=f"Espelho_{nome_func.replace(' ','_')}_{start_date.isoformat()}.pdf"
+        )
+        if not filepath: return
+
+        try:
+            doc = SimpleDocTemplate(filepath, pagesize=landscape(A4), rightMargin=1.5*cm, leftMargin=1.5*cm, topMargin=1.0*cm, bottomMargin=1.0*cm)
+            styles = getSampleStyleSheet()
+            story = []
+
+            # Cabeçalho do Relatório
+            style_title = styles['h1']
+            style_title.alignment = TA_LEFT
+            style_title.textColor = colors.teal
             
+            if LOGO_PATH.exists():
+                story.append(Image(LOGO_PATH, width=2.5*cm, height=2.5*cm, hAlign='LEFT'))
+            
+            story.append(Paragraph(f"Espelho de Ponto: {nome_func} (Mat. {target_matricula})", style_title))
+            story.append(Paragraph(f"Período: {start_date.strftime('%d/%m/%Y')} a {end_date.strftime('%d/%m/%Y')} | Setor: {func_info.get('setor')}", styles['Normal']))
+            story.append(Spacer(1, 0.5*cm))
+
+            # Tabela de Batidas
+            col_headers = ["Data", "E1", "S1", "E2", "S2", "Trabalhado", "Desconto"]
+            table_data = [col_headers]
             for item in panorama_data:
-                total_trabalhado_min += parse_hhmm_to_minutes(item.get('Carga_Horaria', '00:00:00'))
-                
-            primeiro_dia = panorama_data[0]
-            saldo_bh_inicio_semana = parse_hhmm_to_minutes(primeiro_dia.get('BH_Anterior', '00:00:00'))
-            saldo_extras_inicio_semana = int(primeiro_dia.get('Extras_Anterior', '0'))
+                data_f = datetime.strptime(item['Data'], '%Y-%m-%d').strftime('%d/%m/%Y')
+                table_data.append([data_f, item['E1'], item['S1'], item['E2'], item['S2'], item['Carga_Horaria'], item['Total_Desconto']])
+
+            t = Table(table_data, colWidths=[3*cm, 2*cm, 2*cm, 2*cm, 2*cm, 3*cm, 3*cm])
+            t.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,0), colors.teal),
+                ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+                ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+                ('GRID', (0,0), (-1,-1), 0.5, colors.black),
+                ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ]))
+            story.append(t)
+            story.append(Spacer(1, 1*cm))
+
+            # --- DETALHAMENTO COM SUGESTÃO DE SAÍDA ---
+            story.append(Paragraph("Resumo do Saldo", styles['h2']))
             
-            saldo_bh_fim_semana_str = self.lbl_saldo_bh_total.cget('text')
-            saldo_extras_fim_semana_str = self.lbl_saldo_extras_total.cget('text')
-            saldo_bh_fim_semana_min = parse_hhmm_to_minutes(saldo_bh_fim_semana_str)
-            saldo_extras_fim_semana_int = int(saldo_extras_fim_semana_str) if saldo_extras_fim_semana_str.isdigit() else 0
+            # Cálculo da Saída Sugerida (Sábado)
+            base_date = end_date
+            next_sat = self.find_next_business_day(base_date, is_fichado)
             
-            total_extras_pagas_periodo = self.db.get_extras_paid_in_range(target_matricula, start_date, end_date)
-            extras_geradas_periodo = saldo_extras_fim_semana_int - saldo_extras_inicio_semana + total_extras_pagas_periodo
-            # --- Fim da Lógica de Cálculo ---
-
-            filepath = filedialog.asksaveasfilename(
-                defaultextension=".pdf",
-                filetypes=[("PDF files", "*.pdf")],
-                title="Salvar Espelho de Ponto",
-                initialfile=f"Espelho_Ponto_{nome_func.replace(' ','_')}_{start_date.isoformat()}_a_{end_date.isoformat()}.pdf"
-            )
-            if not filepath:
-                return
-
-            dias_semana = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"]
-
-            try:
-                doc = SimpleDocTemplate(filepath, pagesize=landscape(A4), rightMargin=1.5*cm, leftMargin=1.5*cm, topMargin=1.0*cm, bottomMargin=1.0*cm)
-                styles = getSampleStyleSheet()
-                story = []
-
-                # ... (Definição de estilos) ...
-                style_title = styles['h1']
-                style_title.alignment = TA_LEFT
-                style_title.textColor = colors.teal
-                style_header = styles['h2']
-                style_header.fontSize = 10
-                style_header.alignment = TA_LEFT
-                style_body = styles['Normal']
-                style_body.fontSize = 8
-                style_table_header = styles['Normal']
-                style_table_header.fontSize = 8
-                style_table_header.fontName = 'Helvetica-Bold'
-                style_table_header.alignment = TA_CENTER
-                style_table_body = styles['Normal']
-                style_table_body.fontSize = 7
-                style_table_body.alignment = TA_CENTER
-                style_table_body.textColor = colors.black
-                style_table_body_incomplete = styles['Normal']
-                style_table_body_incomplete.fontSize = 7
-                style_table_body_incomplete.alignment = TA_CENTER
-                style_table_body_incomplete.textColor = colors.black
-                # ... (Fim dos estilos) ...
-
-                # --- Layout do Cabeçalho ---
-                header_data = []
-                logo_cell = Paragraph("Espelho de Ponto", style_title)
-                if LOGO_PATH.exists():
-                    try:
-                        logo_img = Image(LOGO_PATH, width=3*cm, height=3*cm, hAlign='LEFT')
-                        logo_cell = logo_img
-                    except Exception as e:
-                        print(f"Erro ao carregar logo: {e}")
-
-                title_cell = Paragraph("Espelho de Ponto", style_title)
-                if LOGO_PATH.exists():
-                     title_cell.style.alignment = TA_RIGHT
+            if next_sat.weekday() == 5: # Se o próximo dia útil for sábado
+                if saldo_bh_atual_min > 0:
+                    # Pode usar até 4h (240 min) de banco de horas no sábado
+                    minutos_abono = min(saldo_bh_atual_min, 240)
+                    saida_padrao = datetime.combine(next_sat, time(11, 30))
+                    hora_sugerida = (saida_padrao - timedelta(minutes=minutos_abono)).strftime('%H:%M')
+                    msg_saida = f"{hora_sugerida} (Usa {format_minutes_to_hms(minutos_abono)} de BH)"
                 else:
-                     title_cell.style.alignment = TA_CENTER
-                
-                header_data.append([logo_cell, title_cell])
-                
-                header_table = Table(header_data, colWidths=[10*cm, 15.5*cm])
-                header_table.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'TOP')]))
-                story.append(header_table)
-                story.append(Spacer(1, 0.3*cm))
-                # --- Fim do Cabeçalho ---
+                    msg_saida = "11:30 (Padrão)"
+            else:
+                msg_saida = "N/A (Próximo dia útil não é sábado)"
 
-                # --- Agrupar dados do funcionário ---
-                fichado_str = self.lbl_fichado_status.cget('text')
-                setor_str = self.lbl_setor_status.cget('text')
-                story.append(Paragraph(f"<b>Funcionário:</b> {nome_func} (Mat. {target_matricula})", styles['Normal']))
-                story.append(Paragraph(f"<b>Período:</b> {start_date.strftime('%d/%m/%Y')} a {end_date.strftime('%d/%m/%Y')}", styles['Normal']))
-                story.append(Paragraph(f"<b>Fichado:</b> {fichado_str}   |   <b>Setor:</b> {setor_str}", styles['Normal']))
-                story.append(Spacer(1, 0.2*cm))
-                # --- Fim dos dados ---
-                
-                # --- Saldo Início da Semana Centralizado ---
-                style_saldo_inicio = ParagraphStyle(name='SaldoInicio', parent=styles['Normal'], alignment=TA_CENTER)
-                story.append(Paragraph(f"<b>Saldo Início do Período (BH):</b> {format_minutes_to_hms(saldo_bh_inicio_semana)}", style_saldo_inicio))
-                story.append(Spacer(1, 0.2*cm))
-                # --- FIM ---
+            detalhes_data = [
+                ["Carga Exigida no Período:", format_minutes_to_hms(total_exigido_min)],
+                ["Carga Trabalhada no Período:", format_minutes_to_hms(total_trabalhado_min)],
+                ["Saldo Atual Banco de Horas:", format_minutes_to_hms(saldo_bh_atual_min)],
+                ["Sugestão de Saída (Próximo Sábado):", msg_saida]
+            ]
 
-                # --- Tabela de Pontos (sem alteração) ---
-                col_headers = ["Dia", "Mat.", "Nome", "Data", "E1", "S1", "E2", "S2", "Carga", "Punição", "Desconto"]
-                table_data = [[Paragraph(h, style_table_header) for h in col_headers]]
-                col_widths = [2.2*cm, 1.8*cm, 5.5*cm, 2.5*cm, 1.8*cm, 1.8*cm, 1.8*cm, 1.8*cm, 2.5*cm, 2.5*cm, 2.5*cm]
+            t_det = Table(detalhes_data, colWidths=[8*cm, 6*cm])
+            t_det.setStyle(TableStyle([
+                ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+                ('FONTNAME', (0,0), (0,-1), 'Helvetica-Bold'),
+                ('BACKGROUND', (0,3), (1,3), colors.navajowhite), # Destaque na sugestão
+            ]))
+            story.append(t_det)
 
-                for item in panorama_data:
-                    values = (
-                        item['Matricula'], item['Nome'], 
-                        datetime.strptime(item['Data'], '%Y-%m-%d').strftime('%d/%m/%Y'),
-                        item['E1'], item['S1'], item['E2'], item['S2'],
-                        item['Carga_Horaria'],
-                        format_minutes_to_hms(self.db.get_total_punishment_minutes_for_day(item['Matricula'], item['Data'])),
-                        item['Total_Desconto']
-                    )
-                    tags = ['incomplete'] if item.get('is_incomplete', False) else []
-                    cell_style = style_table_body_incomplete if 'incomplete' in tags else style_table_body
-                    try:
-                        data_dt = datetime.strptime(values[2], '%d/%m/%Y').date()
-                        dia_semana_str = dias_semana[data_dt.weekday()]
-                    except: dia_semana_str = "---"
-                    row_data = [
-                        Paragraph(dia_semana_str, cell_style),
-                        Paragraph(values[0], cell_style), Paragraph(values[1], cell_style),
-                        Paragraph(values[2], cell_style), Paragraph(values[3], cell_style),
-                        Paragraph(values[4], cell_style), Paragraph(values[5], cell_style),
-                        Paragraph(values[6], cell_style), Paragraph(values[7], cell_style),
-                        Paragraph(values[8], cell_style), Paragraph(values[9], cell_style),
-                    ]
-                    table_data.append(row_data)
-
-                t = Table(table_data, colWidths=col_widths)
-                style_commands = [
-                    ('BACKGROUND', (0,0), (-1,0), colors.teal),
-                    ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
-                    ('GRID', (0,0), (-1,-1), 1, colors.black),
-                    ('BOX', (0,0), (-1,-1), 1, colors.black),
-                    ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-                ]
-                for i in range(1, len(table_data)):
-                    color = colors.lightgrey if i % 2 == 0 else colors.whitesmoke
-                    style_commands.append(('BACKGROUND', (0,i), (-1,i), color))
-                style_commands.append(('ALIGN', (1,1), (1,-1), 'LEFT'))
-                style_commands.append(('ALIGN', (2,1), (2,-1), 'LEFT'))
-                t.setStyle(TableStyle(style_commands))
-                story.append(t)
-                story.append(Spacer(1, 0.3*cm))
-                # --- Fim Tabela de Pontos ---
-
-                # --- MODIFICAÇÃO: Detalhamento do Período ---
-                style_h2_center = ParagraphStyle(name='h2Center', parent=styles['h2'], alignment=TA_CENTER)
-                story.append(Paragraph("Detalhamento do Período", style_h2_center))
-                
-                style_detalhe_label = ParagraphStyle(name='DetalheLabel', parent=styles['Normal'], fontName='Helvetica-Bold')
-                style_detalhe_valor = ParagraphStyle(name='DetalheValor', parent=styles['Normal'], alignment=TA_CENTER)
-                
-                bh_final_p = Paragraph(saldo_bh_fim_semana_str, style_detalhe_valor)
-                if saldo_bh_fim_semana_min < 0:
-                    bh_final_p.style.textColor = colors.red
-                else:
-                    bh_final_p.style.textColor = colors.blue
-                
-                detalhamento_data = [
-                    # 1. ORDEM TROCADA
-                    [Paragraph('Carga Horária Exigida:', style_detalhe_label), Paragraph(format_minutes_to_hms(total_exigido_min), style_detalhe_valor)],
-                    [Paragraph('Carga Horária Trabalhada:', style_detalhe_label), Paragraph(format_minutes_to_hms(total_trabalhado_min), style_detalhe_valor)],
-                    [Paragraph('Extras Disponível(s):', style_detalhe_label), Paragraph(f"{total_extras_pagas_periodo} un.", style_detalhe_valor)],
-                    [Paragraph('<b>Saldo Final (BH):</b>', style_detalhe_label), bh_final_p],
-                    # 2. LINHA REMOVIDA
-                    # [Paragraph('<b>Extras Disponíveis:</b>', style_detalhe_label), Paragraph(f"{saldo_extras_fim_semana_int} un.", style_detalhe_valor)],
-                ]
-
-                # --- Lógica do Sábado (com destaque laranja) ---
-                saturday_row_added = False
-                try:
-                    func_info = self.db.get_funcionario_info(target_matricula)
-                    is_fichado = func_info.get('fichado', 0) == 1
-                    remaining_bh = func_info.get('banco_horas', 0)
-                    base_date = end_date
-                    next_business_day = self.find_next_business_day(base_date, is_fichado)
-
-                    if next_business_day.weekday() == 5:
-                        saturday_row_added = True
-                        is_holiday_saturday = self.db.is_holiday(next_business_day.isoformat())
-                        
-                        if is_holiday_saturday:
-                            holiday_info = self.db.get_holidays_in_range(next_business_day, next_business_day)
-                            holiday_name = holiday_info[0].get('descricao', 'Feriado') if holiday_info else 'Feriado'
-                            detalhamento_data.append([
-                                Paragraph('Horário de Saída no Sábado:', style_detalhe_label), 
-                                Paragraph(f"{holiday_name}", style_detalhe_valor)
-                            ])
-                        else:
-                            target_exit_time = self.calculate_bh_zero_exit(remaining_bh, next_business_day)
-                            detalhamento_data.append([
-                                Paragraph('Horário de Saída no Sábado:', style_detalhe_label), 
-                                Paragraph(f"{target_exit_time}", style_detalhe_valor)
-                            ])
-                
-                except Exception as e:
-                    print(f"Erro ao calcular saída Sábado (Espelho): {e}")
-                
-                t_detalhes = Table(detalhamento_data, colWidths=[8*cm, 4*cm])
-                
-                style_commands_detalhes = [
-                    ('GRID', (0,0), (-1,-1), 1, colors.grey),
-                    ('BACKGROUND', (0,0), (0,-1), colors.lightgrey),
-                    ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-                ]
-                
-                if saturday_row_added:
-                    style_commands_detalhes.append(
-                        ('BACKGROUND', (0,-1), (-1,-1), colors.navajowhite) # Cor Laranja Claro
-                    )
-                
-                t_detalhes.setStyle(TableStyle(style_commands_detalhes))
-                story.append(t_detalhes)
-                story.append(Spacer(1, 0.3*cm))
-                # --- FIM DA MODIFICAÇÃO ---
-
-                # Assinatura
-                story.append(Spacer(1, 0.3*cm))
-                story.append(Paragraph("________________________________________", styles['Normal']))
-                story.append(Paragraph(nome_func, styles['Normal']))
-                story.append(Paragraph(f"Data: ____/____/{datetime.now().year}", styles['Normal']))
-
-                doc.build(story)
-                messagebox.showinfo("Sucesso", f"Espelho de Ponto salvo:\n{filepath}")
-
-            except PermissionError:
-                messagebox.showerror("Erro", fr"Erro de Permissão.\O arquivo '{filepath}' pode estar aberto. Feche-o e tente novamente.")
-            except Exception as e:
-                messagebox.showerror("Erro PDF", f"Não foi possível gerar o PDF: {e}")
-                self.append_log(f"ERRO PDF: {e}")
+            doc.build(story)
+            messagebox.showinfo("Sucesso", f"Relatório exportado com sucesso!")
+        except Exception as e:
+            messagebox.showerror("Erro PDF", f"Erro ao gerar relatório: {e}")
 
     def append_log(self, text):
             if hasattr(self, 'log_area'):
@@ -4717,6 +4621,10 @@ class App:
         justificativa_cmb.bind("<<ComboboxSelected>>", lambda e: entry_edit.focus())
 
     def update_visual_work_hours(self, item_id, edited_column=None):
+        """
+        Atualiza instantaneamente a Carga Horária e o Desconto na tabela visual (Treeview)
+        quando o usuário altera um horário de batida.
+        """
         values = self.tree_viewer.item(item_id, 'values')
         matricula, data_ptbr = values[0], values[2]
         data_db = datetime.strptime(data_ptbr, "%d/%m/%Y").strftime("%Y-%m-%d")
@@ -4726,119 +4634,177 @@ class App:
         sector = func_info.get('setor', 'N/D')
         edit_key = (matricula, data_db)
 
-        # 1. Soma de atraso acumulado real
+        # 1. Soma de atraso acumulado real baseado no que está na tela
         total_late_min = 0
         total_worked_raw = 0
         for i in range(0, 4, 2):
             e_time, s_time = all_times_raw[i], all_times_raw[i+1]
             if e_time and e_time not in ('N/A', '00:00', ''):
-                ent = datetime.strptime(f"{data_db} {e_time}", "%Y-%m-%d %H:%M")
-                oficial = '07:30' if i < 2 else '13:00'
-                j_ini = datetime.strptime(f"{data_db} {oficial}", "%Y-%m-%d %H:%M")
-                total_late_min += max(0, (ent - j_ini).total_seconds() / 60)
+                try:
+                    ent = datetime.strptime(f"{data_db} {e_time}", "%Y-%m-%d %H:%M")
+                    oficial = '07:30' if i < 2 else '13:00'
+                    j_ini = datetime.strptime(f"{data_db} {oficial}", "%Y-%m-%d %H:%M")
+                    total_late_min += max(0, (ent - j_ini).total_seconds() / 60)
 
-                if s_time and s_time not in ('N/A', '00:00', ''):
-                    sai = datetime.strptime(f"{data_db} {s_time}", "%Y-%m-%d %H:%M")
-                    if sai < ent: sai += timedelta(days=1)
-                    total_worked_raw += (sai - ent).total_seconds() / 60
+                    if s_time and s_time not in ('N/A', '00:00', ''):
+                        sai = datetime.strptime(f"{data_db} {s_time}", "%Y-%m-%d %H:%M")
+                        if sai < ent: sai += timedelta(days=1)
+                        total_worked_raw += (sai - ent).total_seconds() / 60
+                except: continue
 
-        # 2. DECISÃO DE PUNIÇÃO (PENTE FINO)
-        # Se a última ação foi editar o desconto, mantém o manual.
-        # Se foi editar horário, obriga o cálculo automático ignorando o que estava na tela.
+        # 2. Decisão da Penalidade Visual
+        # Se a última coluna editada foi 'Total Desconto', mantemos o valor manual.
+        # Se foi qualquer horário (E1, S1, etc.), recalculamos automaticamente.
         if edited_column == "Total Desconto" and edit_key in self.unsaved_edits:
             penalidade_final = parse_hhmm_to_minutes(self.unsaved_edits[edit_key]['Total_Desconto'])
         else:
+            # Se você botou 07:30 na tela, aqui resultará em 00:00:00
             penalidade_final = calculate_deduction(total_late_min, sector)
 
-        # 3. Atualiza os campos de Carga Horária e Desconto na tabela
+        # 3. Atualiza os campos na Treeview
         new_values = list(values)
-        new_values[7] = format_minutes_to_hms(max(0, total_worked_raw - penalidade_final))
-        new_values[9] = format_minutes_to_hms(penalidade_final)
+        new_values[7] = format_minutes_to_hms(max(0, total_worked_raw - penalidade_final)) # Carga Líquida
+        new_values[9] = format_minutes_to_hms(penalidade_final) # Total Desconto
         
         self.tree_viewer.item(item_id, values=tuple(new_values))
 
 
     def process_manual_update_and_save(self, matricula, data_db, all_times_raw, justificativa, desconto_manual=None):
         """
-        Processa as alterações de ponto, calcula atrasos de forma cumulativa 
-        e salva no banco de dados, garantindo a integridade entre horários e descontos.
+        Processa ajuste manual de batidas, salva o dia e recalcula o saldo total do funcionário.
+
+        Regras:
+        - recalcula corretamente E1/S1/E2/S2;
+        - aplica multiplicador de atraso por setor;
+        - aceita desconto manual, que prevalece quando informado;
+        - grava horas_trabalhadas;
+        - reprocessa o saldo total e persiste em funcionarios.
         """
-        func_info = self.db.get_funcionario_info(matricula)
-        sector = func_info.get('setor', 'N/D')
-        
-        total_late_minutes = 0
-        total_worked_raw = 0
-        periodos = []
+        try:
+            matricula = str(matricula).split(" - ")[0].strip()
+            func_info = self.db.get_funcionario_info(matricula)
+            if not func_info:
+                raise Exception(f"Funcionário não encontrado: {matricula}")
 
-        # 1. Primeiro Passo: Calcular o atraso TOTAL acumulado e tempo bruto trabalhado
-        for i in range(0, 4, 2):
-            e_time, s_time = all_times_raw[i], all_times_raw[i+1]
-            
-            if e_time and e_time not in ('N/A', '00:00', ''):
+            setor = func_info.get("setor", "N/D")
+
+            tempos = list(all_times_raw) if all_times_raw else []
+            while len(tempos) < 4:
+                tempos.append("")
+
+            tempos = [(t or "").strip() for t in tempos]
+            tempos_normalizados = []
+            for t in tempos:
+                if t in ("N/A", "00:00", ""):
+                    tempos_normalizados.append("")
+                else:
+                    tempos_normalizados.append(t)
+
+            periodos = []
+            minutos_totais_brutos = 0.0
+            minutos_totais_deducao = 0.0
+
+            pares = [
+                ("07:30", tempos_normalizados[0], tempos_normalizados[1], 0),
+                ("13:00", tempos_normalizados[2], tempos_normalizados[3], 2),
+            ]
+
+            for horario_oficial, entrada_raw, saida_raw, turno_idx in pares:
+                if not entrada_raw:
+                    continue
+
                 try:
-                    entrada = datetime.strptime(f"{data_db} {e_time}", "%Y-%m-%d %H:%M")
-                    # Define o horário oficial de entrada para o turno
-                    oficial_str = '07:30' if i < 2 else '13:00'
-                    jornada_inicio = datetime.strptime(f"{data_db} {oficial_str}", "%Y-%m-%d %H:%M")
-                    
-                    # Acumula o atraso real do dia
-                    atraso_do_turno = max(0, (entrada - jornada_inicio).total_seconds() / 60)
-                    total_late_minutes += atraso_do_turno
-
-                    if s_time and s_time not in ('N/A', '00:00', ''):
-                        saida = datetime.strptime(f"{data_db} {s_time}", "%Y-%m-%d %H:%M")
-                        if saida < entrada: saida += timedelta(days=1)
-                        
-                        duracao_bruta = (saida - entrada).total_seconds() / 60
-                        total_worked_raw += duracao_bruta
-                        
-                        # Adiciona ao dicionário de períodos para o JSON do banco
-                        periodos.append({
-                            "entrada": str(entrada),
-                            "saida": str(saida),
-                            "minutos_brutos": format_minutes_to_hms(duracao_bruta),
-                            "deducao_minutos": "00:00:00", # Será preenchido abaixo
-                            "minutos_liquidos": format_minutes_to_hms(duracao_bruta)
-                        })
-                    else:
-                        # Registro de batida incompleta
-                        periodos.append({
-                            "entrada": str(entrada),
-                            "saida": None,
-                            "minutos_brutos": "00:00:00",
-                            "deducao_minutos": "00:00:00",
-                            "minutos_liquidos": "00:00:00"
-                        })
+                    entrada = datetime.strptime(f"{data_db} {entrada_raw}", "%Y-%m-%d %H:%M")
                 except ValueError:
                     continue
 
-        # 2. Segundo Passo: Definir a penalidade final (Manual vs Automática)
-        # Pente Fino: Se o desconto_manual for 0 ou não informado, o sistema recalcula 
-        # obrigatoriamente pela regra de negócio (Setor + Atraso Acumulado)
-        minutos_manual = parse_hhmm_to_minutes(desconto_manual) if desconto_manual else 0
-        
-        if minutos_manual != 0:
-            penalidade_total_dia = minutos_manual
-        else:
-            # Chama a regra de negócio (Ex: 07:36 = 6min -> Punição Automática)
-            penalidade_total_dia = calculate_deduction(total_late_minutes, sector)
+                saida = None
+                if saida_raw:
+                    try:
+                        saida = datetime.strptime(f"{data_db} {saida_raw}", "%Y-%m-%d %H:%M")
+                        if saida < entrada:
+                            saida += timedelta(days=1)
+                    except ValueError:
+                        saida = None
 
-        # 3. Terceiro Passo: Atualizar o detalhamento de deduções no JSON
-        if periodos:
-            # Atribuímos a penalidade total ao primeiro período para fins de exibição no relatório
-            periodos[0]['deducao_minutos'] = format_minutes_to_hms(penalidade_total_dia)
+                deducao_periodo = 0.0
+                minutos_brutos = 0.0
+                minutos_liquidos = 0.0
 
-        # 4. Quarto Passo: Calcular o líquido final e persistir no SQLite
-        minutos_finais_liquidos = max(0, total_worked_raw - penalidade_total_dia)
+                jornada_inicio = datetime.strptime(f"{data_db} {horario_oficial}", "%Y-%m-%d %H:%M")
+                atraso_minutos = max(0, (entrada - jornada_inicio).total_seconds() / 60)
 
-        self.db.insert_horas_trabalhadas({
-            "matricula": matricula,
-            "data": data_db,
-            "minutos_totais": format_minutes_to_hms(minutos_finais_liquidos),
-            "periodos": periodos
-        }, justificativa=justificativa)
-        
-        self.append_log(f"Salvo: {matricula} em {data_db}. Líquido: {format_minutes_to_hms(minutos_finais_liquidos)} (Penalidade Aplicada: {format_minutes_to_hms(penalidade_total_dia)})")
+                if saida:
+                    minutos_brutos = max(0, (saida - entrada).total_seconds() / 60)
+                    deducao_periodo = calculate_deduction(atraso_minutos, setor)
+                    minutos_liquidos = max(0, minutos_brutos - deducao_periodo)
+                else:
+                    minutos_brutos = 0.0
+                    deducao_periodo = calculate_deduction(atraso_minutos, setor)
+                    minutos_liquidos = 0.0
+
+                minutos_totais_brutos += minutos_brutos
+                minutos_totais_deducao += deducao_periodo
+
+                periodos.append({
+                    "entrada": entrada.strftime("%Y-%m-%d %H:%M:%S") if entrada else None,
+                    "saida": saida.strftime("%Y-%m-%d %H:%M:%S") if saida else None,
+                    "minutos_brutos": format_minutes_to_hms(minutos_brutos),
+                    "deducao_minutos": format_minutes_to_hms(deducao_periodo),
+                    "minutos_liquidos": format_minutes_to_hms(minutos_liquidos)
+                })
+
+            desconto_manual_min = parse_hhmm_to_minutes(desconto_manual) if desconto_manual else 0
+
+            if desconto_manual_min > 0 and periodos:
+                desconto_automatico_total = sum(parse_hhmm_to_minutes(p["deducao_minutos"]) for p in periodos)
+                diferenca = desconto_manual_min - desconto_automatico_total
+
+                primeira_deducao = parse_hhmm_to_minutes(periodos[0]["deducao_minutos"])
+                nova_primeira_deducao = max(0, primeira_deducao + diferenca)
+                periodos[0]["deducao_minutos"] = format_minutes_to_hms(nova_primeira_deducao)
+
+                minutos_totais_deducao = 0.0
+                for p in periodos:
+                    minutos_brutos_p = parse_hhmm_to_minutes(p["minutos_brutos"])
+                    minutos_deducao_p = parse_hhmm_to_minutes(p["deducao_minutos"])
+                    minutos_liquidos_p = max(0, minutos_brutos_p - minutos_deducao_p)
+
+                    p["minutos_liquidos"] = format_minutes_to_hms(minutos_liquidos_p)
+                    minutos_totais_deducao += minutos_deducao_p
+
+            minutos_totais_liquidos = 0.0
+            for p in periodos:
+                minutos_totais_liquidos += parse_hhmm_to_minutes(p["minutos_liquidos"])
+
+            self.db.insert_horas_trabalhadas({
+                "matricula": matricula,
+                "data": data_db,
+                "minutos_totais": format_minutes_to_hms(minutos_totais_liquidos),
+                "periodos": periodos
+            }, justificativa=justificativa)
+
+            recalc_ok = self.db.recalculate_full_balance_for_employee(matricula)
+            if not recalc_ok:
+                raise Exception(f"Falha ao recalcular saldo do funcionário {matricula}")
+
+            info_atualizada = self.db.get_funcionario_info(matricula)
+
+            self.append_log(
+                f"Ajuste salvo para {matricula} em {data_db} | "
+                f"Bruto: {format_minutes_to_hms(minutos_totais_brutos)} | "
+                f"Desconto: {format_minutes_to_hms(minutos_totais_deducao)} | "
+                f"Líquido: {format_minutes_to_hms(minutos_totais_liquidos)} | "
+                f"BH Atual: {format_minutes_to_hms(info_atualizada.get('banco_horas', 0) or 0)} | "
+                f"Extras: {int(info_atualizada.get('extras_disponiveis', 0) or 0)}"
+            )
+
+            return True
+
+        except Exception as e:
+            self.append_log(f"ERRO ao salvar ajuste manual de {matricula} em {data_db}: {e}")
+            return False
+
 
     def commit_all_changes(self, from_exit=False):
             if self.editing_widgets: [w.event_generate('<FocusOut>') for k, w in self.editing_widgets.items() if k == 'entry']
