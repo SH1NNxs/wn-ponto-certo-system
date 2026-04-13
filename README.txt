@@ -113,5 +113,5 @@ Se voce mover o projeto para um novo computador, precisará configurar o ambient
 4. Ative o ambiente:
    .\venv\Scripts\activate
 5. Instale todas as dependências:
-   pip install pyinstaller Pillow reportlab tkcalendar
+   'pip install pyinstaller Pillow reportlab tkcalendar'
 6. Agora voce esta pronto para seguir o fluxo de manutencao normal.

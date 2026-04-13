@@ -18,13 +18,13 @@ import subprocess
 import tempfile
 
 # --- VERSÃO ATUAL ---
-CURRENT_VERSION = "v1.3.0"
+CURRENT_VERSION = "v1.3.1"
 
 # Define a data atual para referência dos cálculos de saldo
 SYSTEM_CURRENT_DATE = date.today()
 
 # Inicializa o Marco Zero do sistema (será atualizado pelo banco de dados)
-SYSTEM_START_DATE = "2026-04-06"
+SYSTEM_START_DATE = "2025-04-06"
 
 # Tenta importar bibliotecas necessárias
 try:
@@ -100,9 +100,9 @@ def create_database(self):
                     self.conn.commit()
                     SYSTEM_START_DATE = data_iso
                 except:
-                    SYSTEM_START_DATE = "2026-04-06"
+                    SYSTEM_START_DATE = "2025-04-06"
             else:
-                SYSTEM_START_DATE = "2026-04-06"
+                SYSTEM_START_DATE = "2025-04-06"
         else:
             # ESSENCIAL: Atualiza a variável global com o que está no banco
             SYSTEM_START_DATE = config_data['valor']
@@ -250,6 +250,7 @@ def calculate_period_data(entrada, saida, data_ref, turno_idx, sector, ignore_de
     return duration_bruto, duration_liquido, deduction_minutes
 
 # --- Classe DatabaseManager ---
+# --- Classe DatabaseManager ---
 class DatabaseManager:
     def __init__(self, db_path=None):
         self.db_path = str(db_path if db_path else DEFAULT_DB)
@@ -259,22 +260,62 @@ class DatabaseManager:
         self.create_database()
         self.check_migrations() 
         self.populate_fixed_holidays()
+        # Garantia explícita para chamadas por self.db.recalculate_full_balance_for_employee
+        self.recalculate_full_balance_for_employee = self.__class__.recalculate_full_balance_for_employee.__get__(self, self.__class__)
 
     def check_migrations(self):
         c = self.conn.cursor()
-        # Verifica ignorar_atraso
         try:
             c.execute("SELECT ignorar_atraso FROM horas_trabalhadas LIMIT 1")
         except sqlite3.OperationalError:
             c.execute("ALTER TABLE horas_trabalhadas ADD COLUMN ignorar_atraso INTEGER DEFAULT 0")
-        
-        # GARANTIA: Verifica se a matricula está na tabela de logs (comum dar erro aqui)
+
         try:
             c.execute("SELECT matricula FROM log_edicoes LIMIT 1")
         except sqlite3.OperationalError:
-            # Se não existir na log_edicoes, o erro "no such column" aparece ao gerar panorama
             c.execute("ALTER TABLE log_edicoes ADD COLUMN matricula TEXT")
-            
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS fechamento_diario (
+                id INTEGER PRIMARY KEY,
+                matricula TEXT NOT NULL,
+                data TEXT NOT NULL,
+                minutos_esperados REAL DEFAULT 0,
+                minutos_trabalhados REAL DEFAULT 0,
+                minutos_punicao REAL DEFAULT 0,
+                minutos_abono REAL DEFAULT 0,
+                minutos_atraso REAL DEFAULT 0,
+                saldo_dia REAL DEFAULT 0,
+                saldo_acumulado_bh REAL DEFAULT 0,
+                extras_acumuladas INTEGER DEFAULT 0,
+                checkpoint_base_id INTEGER,
+                status_fechado INTEGER DEFAULT 1,
+                atualizado_em DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(matricula, data)
+            )
+        """)
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS checkpoints_semanais (
+                id INTEGER PRIMARY KEY,
+                matricula TEXT NOT NULL,
+                data_checkpoint TEXT NOT NULL,
+                data_inicio_semana TEXT NOT NULL,
+                data_fim_semana TEXT NOT NULL,
+                minutos_base_bh REAL DEFAULT 0,
+                extras_base INTEGER DEFAULT 0,
+                minutos_trabalhados_semana REAL DEFAULT 0,
+                minutos_esperados_semana REAL DEFAULT 0,
+                minutos_punicoes_semana REAL DEFAULT 0,
+                minutos_abonos_semana REAL DEFAULT 0,
+                minutos_atraso_semana REAL DEFAULT 0,
+                saldo_semana REAL DEFAULT 0,
+                saldo_final_bh REAL DEFAULT 0,
+                extras_finais INTEGER DEFAULT 0,
+                gerado_em DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(matricula, data_checkpoint)
+            )
+        """)
         self.conn.commit()
 
     def toggle_ignore_delay(self, matricula, data_str):
@@ -418,6 +459,464 @@ class DatabaseManager:
                 messagebox.showwarning("Atenção", "Nenhuma data definida. Cálculos retroativos podem gerar saldos inesperados.")
 
 
+
+
+    def get_system_start_date(self):
+        global SYSTEM_START_DATE
+        c = self.conn.cursor()
+
+        def _parse_any_date(value):
+            if not value:
+                return None
+            value = str(value).strip()
+            for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%Y/%m/%d"):
+                try:
+                    return datetime.strptime(value, fmt).date()
+                except Exception:
+                    continue
+            return None
+
+        c.execute("SELECT valor FROM configuracoes WHERE chave = 'data_inicio_sistema'")
+        row = c.fetchone()
+        cfg_value = row['valor'] if row and row['valor'] else SYSTEM_START_DATE
+        cfg_date = _parse_any_date(cfg_value)
+
+        earliest_found = None
+        for table_name, field_name in (
+            ("horas_trabalhadas", "data"),
+            ("punicoes", "data_punicao"),
+            ("abonos", "data"),
+            ("fechamento_diario", "data"),
+            ("checkpoints_semanais", "data_inicio_semana"),
+        ):
+            try:
+                c.execute(f"SELECT MIN({field_name}) AS d FROM {table_name}")
+                r = c.fetchone()
+                dt = _parse_any_date(r['d']) if r and r['d'] else None
+                if dt and (earliest_found is None or dt < earliest_found):
+                    earliest_found = dt
+            except Exception:
+                pass
+
+        final_date = cfg_date
+        if final_date is None:
+            final_date = earliest_found or datetime.strptime("2025-01-01", "%Y-%m-%d").date()
+
+        if earliest_found and final_date > earliest_found:
+            final_date = earliest_found
+
+        final_str = final_date.strftime("%Y-%m-%d")
+        SYSTEM_START_DATE = final_str
+
+        try:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO configuracoes (chave, valor) VALUES (?, ?)",
+                ('data_inicio_sistema', final_str)
+            )
+            self.conn.commit()
+        except Exception:
+            pass
+
+        return final_date
+
+
+    def get_last_checkpoint_before(self, matricula, target_date):
+        target_str = target_date.isoformat() if isinstance(target_date, date) else str(target_date)
+        c = self.conn.cursor()
+        c.execute(
+            """
+            SELECT *
+            FROM checkpoints_semanais
+            WHERE matricula = ? AND data_checkpoint <= ?
+            ORDER BY data_checkpoint DESC, id DESC
+            LIMIT 1
+            """,
+            (matricula, target_str)
+        )
+        row = c.fetchone()
+        return dict(row) if row else None
+
+    def ensure_daily_rows_until(self, matricula, end_date=None):
+        end_date_obj = end_date if isinstance(end_date, date) else datetime.strptime(str(end_date), "%Y-%m-%d").date() if end_date else date.today()
+        start_dt = self.get_system_start_date()
+        if end_date_obj < start_dt:
+            return 0
+
+        created = 0
+        with self.conn:
+            current = start_dt
+            while current <= end_date_obj:
+                cur = self.conn.execute(
+                    """
+                    INSERT OR IGNORE INTO fechamento_diario (
+                        matricula, data, minutos_esperados, minutos_trabalhados, minutos_punicao,
+                        minutos_abono, minutos_atraso, saldo_dia, saldo_acumulado_bh,
+                        extras_acumuladas, checkpoint_base_id, status_fechado
+                    ) VALUES (?, ?, 0, 0, 0, 0, 0, 0, 0, 0, NULL, 1)
+                    """,
+                    (matricula, current.isoformat())
+                )
+                if cur.rowcount:
+                    created += 1
+                current += timedelta(days=1)
+        return created
+
+    def _get_processing_end_date_for_employee(self, matricula):
+        c = self.conn.cursor()
+        dates = [self.get_system_start_date()]
+        for table_name, field_name in (
+            ("horas_trabalhadas", "data"),
+            ("punicoes", "data_punicao"),
+            ("abonos", "data"),
+        ):
+            try:
+                c.execute(f"SELECT MAX({field_name}) AS d FROM {table_name} WHERE matricula = ?", (matricula,))
+                row = c.fetchone()
+                if row and row['d']:
+                    try:
+                        dates.append(datetime.strptime(row['d'], "%Y-%m-%d").date())
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        return max(dates)
+
+    def _build_daily_closure(self, matricula, data_str, saldo_base_bh, extras_base, checkpoint_base_id=None):
+        func_info = self.get_funcionario_info(matricula)
+        is_fichado = func_info.get('fichado', 0) == 1
+
+        expected = float(self.get_expected_daily_minutes(data_str, is_fichado, matricula) or 0)
+
+        c = self.conn.cursor()
+        c.execute("SELECT minutos_totais, periodos FROM horas_trabalhadas WHERE matricula = ? AND data = ?", (matricula, data_str))
+        row = c.fetchone()
+
+        worked = parse_hhmm_to_minutes(row['minutos_totais']) if row and row['minutos_totais'] else 0.0
+        atraso = 0.0
+        if row and row['periodos']:
+            try:
+                periodos = json.loads(row['periodos'])
+                for p in periodos:
+                    atraso += parse_hhmm_to_minutes(p.get('deducao_minutos', '00:00:00'))
+            except Exception:
+                pass
+
+        punicao = float(self.get_total_punishment_minutes_for_day(matricula, data_str) or 0)
+        abono = float(self.get_abono_minutes_for_day(matricula, data_str) or 0)
+
+        saldo_dia = float(worked - expected - punicao + abono)
+        saldo_final_bh = float(saldo_base_bh + saldo_dia)
+        extras_finais = int(extras_base)
+
+        while saldo_final_bh >= MINUTOS_UNIDADE_EXTRA:
+            saldo_final_bh -= MINUTOS_UNIDADE_EXTRA
+            extras_finais += 1
+
+        while saldo_final_bh < 0 and extras_finais > 0:
+            saldo_final_bh += MINUTOS_UNIDADE_EXTRA
+            extras_finais -= 1
+
+        return {
+            'matricula': matricula,
+            'data': data_str,
+            'minutos_esperados': expected,
+            'minutos_trabalhados': worked,
+            'minutos_punicao': punicao,
+            'minutos_abono': abono,
+            'minutos_atraso': atraso,
+            'saldo_dia': saldo_dia,
+            'saldo_acumulado_bh': saldo_final_bh,
+            'extras_acumuladas': extras_finais,
+            'checkpoint_base_id': checkpoint_base_id,
+        }
+
+    def get_balance_snapshot_before_date(self, matricula, target_date):
+        target_dt = target_date if isinstance(target_date, date) else datetime.strptime(str(target_date), "%Y-%m-%d").date()
+        prev_day = target_dt - timedelta(days=1)
+        c = self.conn.cursor()
+
+        c.execute(
+            """
+            SELECT saldo_acumulado_bh, extras_acumuladas
+            FROM fechamento_diario
+            WHERE matricula = ? AND data = ?
+            """,
+            (matricula, prev_day.isoformat())
+        )
+        row = c.fetchone()
+        if row:
+            return float(row['saldo_acumulado_bh'] or 0), int(row['extras_acumuladas'] or 0), None
+
+        checkpoint = self.get_last_checkpoint_before(matricula, prev_day)
+        if checkpoint:
+            return float(checkpoint['saldo_final_bh'] or 0), int(checkpoint['extras_finais'] or 0), int(checkpoint['id'])
+
+        func_info = self.get_funcionario_info(matricula)
+        return (
+            float(func_info.get('banco_horas_inicial', 0) or 0),
+            int(func_info.get('extras_disponiveis_inicial', 0) or 0),
+            None
+        )
+
+    def clear_reprocessing_from_date(self, matricula, from_date):
+        from_dt = from_date if isinstance(from_date, date) else datetime.strptime(str(from_date), "%Y-%m-%d").date()
+        with self.conn:
+            self.conn.execute(
+                "DELETE FROM fechamento_diario WHERE matricula = ? AND data >= ?",
+                (matricula, from_dt.isoformat())
+            )
+            self.conn.execute(
+                "DELETE FROM checkpoints_semanais WHERE matricula = ? AND data_checkpoint >= ?",
+                (matricula, from_dt.isoformat())
+            )
+
+    def get_first_entry_for_day(self, matricula, data_str):
+        c = self.conn.cursor()
+        c.execute("SELECT periodos FROM horas_trabalhadas WHERE matricula = ? AND data = ?", (matricula, data_str))
+        row = c.fetchone()
+        if not row or not row['periodos']:
+            return None
+        try:
+            periodos = json.loads(row['periodos'])
+        except Exception:
+            return None
+
+        entradas = []
+        for p in periodos:
+            entrada = p.get('entrada')
+            if entrada:
+                dt = try_parse_datetime(entrada)
+                if dt:
+                    entradas.append(dt)
+        return min(entradas) if entradas else None
+
+    def get_saturday_exit_suggestions_for_period(self, matricula, start_date, end_date):
+        """
+        Gera sugestão de saída para sábados com a regra solicitada pelo negócio:
+        - jornada padrão de sábado = 4h (240 min)
+        - se o BH no início do sábado for positivo, ele reduz o tempo a trabalhar
+        - se o BH for zero ou negativo, trabalha a carga normal do sábado
+        - a hora sugerida considera a ENTRADA REAL do sábado
+
+        Exemplo:
+        - entrada 07:30 + BH início 01:00:00 => saída sugerida 10:30
+        - entrada 07:30 + BH início 00:00:00 => saída sugerida 11:30
+        """
+        start_dt = start_date if isinstance(start_date, date) else datetime.strptime(str(start_date), "%Y-%m-%d").date()
+        end_dt = end_date if isinstance(end_date, date) else datetime.strptime(str(end_date), "%Y-%m-%d").date()
+        suggestions = []
+        current = start_dt
+
+        while current <= end_dt:
+            if current.weekday() == 5:
+                entry_dt = self.get_first_entry_for_day(matricula, current.isoformat())
+                bh_before, extras_before, _ = self.get_balance_snapshot_before_date(matricula, current)
+                bh_positive = max(0, float(bh_before or 0))
+                minutos_creditados = min(bh_positive, float(MINUTOS_JORNADA_SABADO))
+                minutos_a_trabalhar = max(0, float(MINUTOS_JORNADA_SABADO) - minutos_creditados)
+
+                suggestion = {
+                    'data': current.isoformat(),
+                    'entrada': entry_dt.strftime('%H:%M') if entry_dt else '--:--',
+                    'bh_disponivel_inicio': float(bh_before or 0),
+                    'extras_disponiveis_inicio': int(extras_before or 0),
+                    'minutos_compensaveis': minutos_creditados,
+                    'minutos_a_trabalhar': minutos_a_trabalhar,
+                    'saida_sugerida': '--:--',
+                    'observacao': 'Sem entrada registrada'
+                }
+
+                if entry_dt:
+                    suggested_exit = entry_dt + timedelta(minutes=minutos_a_trabalhar)
+                    suggestion['saida_sugerida'] = suggested_exit.strftime('%H:%M')
+                    if bh_positive > 0:
+                        suggestion['observacao'] = 'BH positivo reduz a jornada de sábado.'
+                    else:
+                        suggestion['observacao'] = 'Sem BH positivo: saída padrão após 4h trabalhadas.'
+
+                suggestions.append(suggestion)
+            current += timedelta(days=1)
+        return suggestions
+
+    def get_exit_suggestion_for_reference_date(self, matricula, reference_date):
+        """
+        Retorna a sugestão de saída para a DATA FINAL selecionada no panorama/PDF.
+        Regras de negócio:
+        - seg-sex: saída padrão 17:00
+        - sábado: saída padrão 11:30
+        - domingo: sem sugestão
+        - usa APENAS BH positivo disponível no início do dia
+        - a sugestão é calculada como SAÍDA PADRÃO - BH positivo, limitada à jornada do dia
+        """
+        ref_dt = reference_date if isinstance(reference_date, date) else datetime.strptime(str(reference_date), "%Y-%m-%d").date()
+        bh_before, extras_before, _ = self.get_balance_snapshot_before_date(matricula, ref_dt)
+        bh_positive = max(0, float(bh_before or 0))
+
+        if ref_dt.weekday() == 6:
+            return {
+                'data': ref_dt.isoformat(),
+                'bh_inicio': float(bh_before or 0),
+                'extras_inicio': int(extras_before or 0),
+                'saida_padrao': '--:--',
+                'saida_sugerida': 'N/A',
+                'minutos_creditados': 0.0,
+                'observacao': 'Dia final selecionado é domingo.'
+            }
+
+        if ref_dt.weekday() == 5:
+            jornada_min = float(MINUTOS_JORNADA_SABADO)
+            saida_padrao_dt = datetime.combine(ref_dt, time(11, 30))
+            saida_padrao_str = '11:30'
+        else:
+            jornada_min = float(MINUTOS_JORNADA_SEG_SEX)
+            saida_padrao_dt = datetime.combine(ref_dt, time(17, 0))
+            saida_padrao_str = '17:00'
+
+        minutos_creditados = min(bh_positive, jornada_min)
+        saida_sugerida_dt = saida_padrao_dt - timedelta(minutes=minutos_creditados)
+
+        if minutos_creditados > 0:
+            observacao = f"BH positivo reduz a jornada do dia final em {format_minutes_to_hms(minutos_creditados)}."
+        else:
+            observacao = 'Sem BH positivo: saída padrão do dia final.'
+
+        return {
+            'data': ref_dt.isoformat(),
+            'bh_inicio': float(bh_before or 0),
+            'extras_inicio': int(extras_before or 0),
+            'saida_padrao': saida_padrao_str,
+            'saida_sugerida': saida_sugerida_dt.strftime('%H:%M'),
+            'minutos_creditados': minutos_creditados,
+            'observacao': observacao
+        }
+
+    def generate_weekly_checkpoint(self, matricula, saturday_date):
+        saturday_obj = saturday_date if isinstance(saturday_date, date) else datetime.strptime(str(saturday_date), "%Y-%m-%d").date()
+        week_start = saturday_obj - timedelta(days=5)
+        c = self.conn.cursor()
+        c.execute(
+            """
+            SELECT * FROM fechamento_diario
+            WHERE matricula = ? AND data BETWEEN ? AND ?
+            ORDER BY data ASC
+            """,
+            (matricula, week_start.isoformat(), saturday_obj.isoformat())
+        )
+        rows = [dict(r) for r in c.fetchall()]
+        if not rows:
+            return False
+
+        prev_checkpoint = self.get_last_checkpoint_before(matricula, week_start - timedelta(days=1))
+        func_info = self.get_funcionario_info(matricula)
+
+        base_bh = float(prev_checkpoint['saldo_final_bh']) if prev_checkpoint else float(func_info.get('banco_horas_inicial', 0) or 0)
+        base_extras = int(prev_checkpoint['extras_finais']) if prev_checkpoint else int(func_info.get('extras_disponiveis_inicial', 0) or 0)
+
+        minutos_trabalhados_semana = sum(float(r.get('minutos_trabalhados', 0) or 0) for r in rows)
+        minutos_esperados_semana = sum(float(r.get('minutos_esperados', 0) or 0) for r in rows)
+        minutos_punicoes_semana = sum(float(r.get('minutos_punicao', 0) or 0) for r in rows)
+        minutos_abonos_semana = sum(float(r.get('minutos_abono', 0) or 0) for r in rows)
+        minutos_atraso_semana = sum(float(r.get('minutos_atraso', 0) or 0) for r in rows)
+        saldo_semana = sum(float(r.get('saldo_dia', 0) or 0) for r in rows)
+        saldo_final_bh = float(rows[-1]['saldo_acumulado_bh'] or 0)
+        extras_finais = int(rows[-1]['extras_acumuladas'] or 0)
+
+        with self.conn:
+            self.conn.execute(
+                "DELETE FROM checkpoints_semanais WHERE matricula = ? AND data_checkpoint = ?",
+                (matricula, saturday_obj.isoformat())
+            )
+            self.conn.execute(
+                """
+                INSERT INTO checkpoints_semanais (
+                    matricula, data_checkpoint, data_inicio_semana, data_fim_semana,
+                    minutos_base_bh, extras_base, minutos_trabalhados_semana,
+                    minutos_esperados_semana, minutos_punicoes_semana, minutos_abonos_semana,
+                    minutos_atraso_semana, saldo_semana, saldo_final_bh, extras_finais
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    matricula, saturday_obj.isoformat(), week_start.isoformat(), saturday_obj.isoformat(),
+                    base_bh, base_extras, minutos_trabalhados_semana, minutos_esperados_semana,
+                    minutos_punicoes_semana, minutos_abonos_semana, minutos_atraso_semana,
+                    saldo_semana, saldo_final_bh, extras_finais
+                )
+            )
+        return True
+
+    def process_range_from_date(self, matricula, from_date, end_date=None):
+        from_dt = from_date if isinstance(from_date, date) else datetime.strptime(str(from_date), "%Y-%m-%d").date()
+        end_dt = end_date if isinstance(end_date, date) else datetime.strptime(str(end_date), "%Y-%m-%d").date() if end_date else self._get_processing_end_date_for_employee(matricula)
+        system_start = self.get_system_start_date()
+
+        if from_dt < system_start:
+            from_dt = system_start
+        if end_dt < from_dt:
+            bh_base, extras_base, _ = self.get_balance_snapshot_before_date(matricula, from_dt)
+            with self.conn:
+                self.conn.execute(
+                    "UPDATE funcionarios SET banco_horas = ?, extras_disponiveis = ? WHERE matricula = ?",
+                    (bh_base, extras_base, matricula)
+                )
+            return True
+
+        self.ensure_daily_rows_until(matricula, end_dt)
+        self.clear_reprocessing_from_date(matricula, from_dt)
+        saldo_base_bh, extras_base, checkpoint_base_id = self.get_balance_snapshot_before_date(matricula, from_dt)
+
+        current = from_dt
+        with self.conn:
+            while current <= end_dt:
+                closure = self._build_daily_closure(matricula, current.isoformat(), saldo_base_bh, extras_base, checkpoint_base_id)
+                self.conn.execute(
+                    """
+                    INSERT OR REPLACE INTO fechamento_diario (
+                        matricula, data, minutos_esperados, minutos_trabalhados, minutos_punicao,
+                        minutos_abono, minutos_atraso, saldo_dia, saldo_acumulado_bh,
+                        extras_acumuladas, checkpoint_base_id, status_fechado, atualizado_em
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+                    """,
+                    (
+                        closure['matricula'], closure['data'], closure['minutos_esperados'], closure['minutos_trabalhados'],
+                        closure['minutos_punicao'], closure['minutos_abono'], closure['minutos_atraso'], closure['saldo_dia'],
+                        closure['saldo_acumulado_bh'], closure['extras_acumuladas'], closure['checkpoint_base_id']
+                    )
+                )
+                saldo_base_bh = closure['saldo_acumulado_bh']
+                extras_base = closure['extras_acumuladas']
+
+                if current.weekday() == 5:
+                    self.generate_weekly_checkpoint(matricula, current)
+                    fresh_checkpoint = self.get_last_checkpoint_before(matricula, current)
+                    if fresh_checkpoint:
+                        saldo_base_bh = float(fresh_checkpoint['saldo_final_bh'] or saldo_base_bh)
+                        extras_base = int(fresh_checkpoint['extras_finais'] or extras_base)
+                        checkpoint_base_id = int(fresh_checkpoint['id'])
+                current += timedelta(days=1)
+
+            self.conn.execute(
+                "UPDATE funcionarios SET banco_horas = ?, extras_disponiveis = ? WHERE matricula = ?",
+                (saldo_base_bh, extras_base, matricula)
+            )
+        return True
+
+    def recalculate_full_balance_for_employee(self, matricula, recalc_from_date=None):
+        try:
+            matricula = str(matricula).split(" - ")[0].strip()
+            end_dt = self._get_processing_end_date_for_employee(matricula)
+            from_dt = recalc_from_date if recalc_from_date else self.get_system_start_date()
+            if isinstance(from_dt, str):
+                from_dt = datetime.strptime(from_dt, "%Y-%m-%d").date()
+            self.ensure_daily_rows_until(matricula, end_dt)
+            self.process_range_from_date(matricula, from_dt, end_dt)
+            return True
+        except Exception as e:
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
+            print(f"Erro em recalculate_full_balance_for_employee({matricula}): {e}")
+            return False
 
     def populate_fixed_holidays(self):
         fixed_holidays = [
@@ -1239,41 +1738,32 @@ class DatabaseManager:
             return False
 
 
+
     def get_point_panorama(self, start_date, end_date, target_matricula=None):
         """
         Retorna os dados do panorama para exibição na Treeview.
 
-        REGRAS IMPORTANTES:
-        - NÃO simula saldo em memória.
-        - Lê banco_horas e extras_disponiveis DIRETAMENTE da tabela funcionarios.
-        - Respeita o período informado.
-        - Extrai E1/S1/E2/S2 do JSON 'periodos'.
+        Regras:
+        - horários vêm de horas_trabalhadas
+        - carga/punição/descontos/saldo acumulado vêm de fechamento_diario
+        - se houver data alterada no passado, o panorama reflete o recálculo persistido
         """
         try:
             if not start_date or not end_date:
                 return []
 
-            if isinstance(start_date, str):
-                start_date_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
-            else:
-                start_date_obj = start_date
-
-            if isinstance(end_date, str):
-                end_date_obj = datetime.strptime(end_date, "%Y-%m-%d").date()
-            else:
-                end_date_obj = end_date
+            start_date_obj = datetime.strptime(start_date, "%Y-%m-%d").date() if isinstance(start_date, str) else start_date
+            end_date_obj = datetime.strptime(end_date, "%Y-%m-%d").date() if isinstance(end_date, str) else end_date
 
             if end_date_obj < start_date_obj:
                 start_date_obj, end_date_obj = end_date_obj, start_date_obj
 
             c = self.conn.cursor()
 
-            funcionarios = []
             if target_matricula and str(target_matricula).strip() != "Todos":
                 matricula_limpa = str(target_matricula).split(" - ")[0].strip()
                 info = self.get_funcionario_info(matricula_limpa)
-                if info:
-                    funcionarios = [info]
+                funcionarios = [info] if info else []
             else:
                 funcionarios = self.get_all_funcionarios()
 
@@ -1281,113 +1771,101 @@ class DatabaseManager:
                 return []
 
             matriculas_list = [f["matricula"] for f in funcionarios if f and f.get("matricula")]
-            if not matriculas_list:
-                return []
-
             placeholders = ",".join(["?"] * len(matriculas_list))
 
-            c.execute(f"""
-                SELECT
-                    matricula,
-                    data,
-                    minutos_totais,
-                    periodos,
-                    ignorar_atraso
+            c.execute(
+                f"""
+                SELECT matricula, data, minutos_totais, periodos, ignorar_atraso
                 FROM horas_trabalhadas
                 WHERE matricula IN ({placeholders})
-                AND data BETWEEN ? AND ?
+                  AND data BETWEEN ? AND ?
                 ORDER BY matricula, data
-            """, matriculas_list + [start_date_obj.isoformat(), end_date_obj.isoformat()])
-            horas_rows = c.fetchall()
+                """,
+                matriculas_list + [start_date_obj.isoformat(), end_date_obj.isoformat()]
+            )
+            work_map = {(r["matricula"], r["data"]): dict(r) for r in c.fetchall()}
 
-            work_map = {}
-            for row in horas_rows:
-                key = (row["matricula"], row["data"])
-                work_map[key] = dict(row)
+            c.execute(
+                f"""
+                SELECT matricula, data, minutos_trabalhados, minutos_punicao, minutos_atraso,
+                       saldo_acumulado_bh, extras_acumuladas
+                FROM fechamento_diario
+                WHERE matricula IN ({placeholders})
+                  AND data BETWEEN ? AND ?
+                ORDER BY matricula, data
+                """,
+                matriculas_list + [start_date_obj.isoformat(), end_date_obj.isoformat()]
+            )
+            closure_map = {(r["matricula"], r["data"]): dict(r) for r in c.fetchall()}
 
             panorama_final = []
 
             for func in funcionarios:
                 matricula = func["matricula"]
-                info_real = self.get_funcionario_info(matricula)
-
                 current_date_iter = start_date_obj
+
                 while current_date_iter <= end_date_obj:
                     data_str = current_date_iter.isoformat()
+                    work_row = work_map.get((matricula, data_str))
+                    closure_row = closure_map.get((matricula, data_str))
 
-                    row = work_map.get((matricula, data_str))
                     e1 = ""
                     s1 = ""
                     e2 = ""
                     s2 = ""
-                    carga_h = "00:00:00"
-                    total_desconto = "00:00:00"
                     is_incomplete = False
 
-                    if row:
-                        carga_h = row.get("minutos_totais") or "00:00:00"
-
-                        periodos_json = row.get("periodos") or "[]"
+                    if work_row:
                         try:
-                            periodos = json.loads(periodos_json)
+                            periodos = json.loads(work_row.get("periodos") or "[]")
                         except Exception:
                             periodos = []
 
-                        horarios_extraidos = []
-                        desconto_total_min = 0
-
+                        horarios = []
                         for p in periodos:
                             entrada_str = p.get("entrada")
                             saida_str = p.get("saida")
-                            deducao_str = p.get("deducao_minutos", "00:00:00")
-
-                            desconto_total_min += parse_hhmm_to_minutes(deducao_str)
-
                             if entrada_str:
-                                try:
-                                    entrada_dt = try_parse_datetime(entrada_str)
-                                    horarios_extraidos.append(entrada_dt.strftime("%H:%M") if entrada_dt else "")
-                                except Exception:
-                                    horarios_extraidos.append("")
-
+                                dt = try_parse_datetime(entrada_str)
+                                horarios.append(dt.strftime("%H:%M") if dt else "")
                             if saida_str:
-                                try:
-                                    saida_dt = try_parse_datetime(saida_str)
-                                    horarios_extraidos.append(saida_dt.strftime("%H:%M") if saida_dt else "")
-                                except Exception:
-                                    horarios_extraidos.append("")
+                                dt = try_parse_datetime(saida_str)
+                                horarios.append(dt.strftime("%H:%M") if dt else "")
                             else:
                                 is_incomplete = True
 
-                        if len(horarios_extraidos) > 0:
-                            e1 = horarios_extraidos[0]
-                        if len(horarios_extraidos) > 1:
-                            s1 = horarios_extraidos[1]
-                        if len(horarios_extraidos) > 2:
-                            e2 = horarios_extraidos[2]
-                        if len(horarios_extraidos) > 3:
-                            s2 = horarios_extraidos[3]
+                        if len(horarios) > 0:
+                            e1 = horarios[0]
+                        if len(horarios) > 1:
+                            s1 = horarios[1]
+                        if len(horarios) > 2:
+                            e2 = horarios[2]
+                        if len(horarios) > 3:
+                            s2 = horarios[3]
 
-                        total_desconto = format_minutes_to_hms(desconto_total_min)
+                    carga_h = format_minutes_to_hms((closure_row or {}).get("minutos_trabalhados", 0) or 0)
+                    punicao = format_minutes_to_hms((closure_row or {}).get("minutos_punicao", 0) or 0)
+                    total_desconto = format_minutes_to_hms((closure_row or {}).get("minutos_atraso", 0) or 0)
+                    bh_saldo = format_minutes_to_hms((closure_row or {}).get("saldo_acumulado_bh", 0) or 0)
+                    extras_disp = str(int((closure_row or {}).get("extras_acumuladas", 0) or 0))
 
                     ponto_dict = {
                         "Matricula": matricula,
-                        "Nome": info_real.get("nome", ""),
+                        "Nome": func.get("nome", ""),
                         "Data": data_str,
                         "E1": e1,
                         "S1": s1,
                         "E2": e2,
                         "S2": s2,
                         "Carga_Horaria": carga_h,
-                        "Punicao": "00:00:00",
+                        "Punicao": punicao,
                         "Total_Desconto": total_desconto,
                         "BH_Anterior": "--",
                         "Extras_Anterior": "--",
-                        "BH_Saldo": format_minutes_to_hms(info_real.get("banco_horas", 0) or 0),
-                        "Extras_Disp": str(int(info_real.get("extras_disponiveis", 0) or 0)),
+                        "BH_Saldo": bh_saldo,
+                        "Extras_Disp": extras_disp,
                         "is_incomplete": is_incomplete
                     }
-
                     panorama_final.append(ponto_dict)
                     current_date_iter += timedelta(days=1)
 
@@ -1398,7 +1876,6 @@ class DatabaseManager:
             print(f"Erro em get_point_panorama: {e}")
             return []
 
-    
     def reprocess_daily_data(self, matricula):
         """
         Força o reprocessamento de cada dia importado usando a lógica de cálculo ATUAL.
@@ -1451,240 +1928,238 @@ class DatabaseManager:
                 self.conn.execute("UPDATE horas_trabalhadas SET minutos_totais=?, periodos=? WHERE matricula=? AND data=?", 
                                   (format_minutes_to_hms(minutos_totais_novo), json.dumps(novos_periodos), matricula, data_str))
     
+
     def get_detailed_stats_for_period(self, matricula, start_date, end_date):
-        """Gera estatísticas detalhadas simulando o período."""
-        
+        """
+        Gera estatísticas detalhadas do período a partir do fechamento diário persistido
+        e inclui sugestões de saída aos sábados.
+        """
         func_info = self.get_funcionario_info(matricula)
         if not func_info:
             raise Exception(f"Funcionário {matricula} não encontrado.")
-            
-        is_fichado = func_info.get('fichado', 0) == 1
-        
-        stats = {
-            'matricula': matricula,
-            'nome': func_info.get('nome', 'N/D'),
-            'start_date': start_date,
-            'end_date': end_date,
-            'dias_trabalhados': 0,
-            'faltas_abonadas': 0,
-            'faltas_nao_abonadas': 0,
-            'minutos_abonados_total': 0, # <-- NOVO CAMPO
-            'punicoes_min': 0,
-            'punicoes_count': 0,
-            'atrasos_deduzidos_min': 0,
-            'dias_com_atraso': 0,
-            'bh_start': 0,
-            'bh_end': 0,
-            'extras_start': 0,
-            'extras_end': 0,
-            'extras_geradas_periodo': 0
-        }
+
+        start_dt = start_date if isinstance(start_date, date) else datetime.strptime(str(start_date), "%Y-%m-%d").date()
+        end_dt = end_date if isinstance(end_date, date) else datetime.strptime(str(end_date), "%Y-%m-%d").date()
+
+        if end_dt < start_dt:
+            start_dt, end_dt = end_dt, start_dt
+
+        self.process_range_from_date(matricula, start_dt, end_dt)
 
         c = self.conn.cursor()
-        
-        # 1. Coleta todos os dados relevantes de uma vez
-        c.execute("SELECT data, minutos_totais, periodos FROM horas_trabalhadas WHERE matricula = ? AND data >= ? AND data <= ? ORDER BY data ASC", (matricula, SYSTEM_START_DATE, end_date.isoformat()))
-        all_work_days = c.fetchall()
-        work_map = {row['data']: {'minutos': parse_hhmm_to_minutes(row['minutos_totais']), 'periodos': row['periodos']} for row in all_work_days}
-        
-        punicoes = self.get_punishments_in_range(matricula, SYSTEM_START_DATE, end_date)
-        punicoes_map = {p['data_punicao']: p['minutos_descontados'] for p in punicoes}
-        
-        # Agora pega o mapa de minutos
-        abonos = self.get_abonos_in_range(matricula, SYSTEM_START_DATE, end_date)
-        abonos_map = {a['data']: a.get('minutos_abonados', 0) for a in abonos}
+        c.execute(
+            """
+            SELECT *
+            FROM fechamento_diario
+            WHERE matricula = ? AND data BETWEEN ? AND ?
+            ORDER BY data ASC
+            """,
+            (matricula, start_dt.isoformat(), end_dt.isoformat())
+        )
+        rows = [dict(r) for r in c.fetchall()]
+        row_map = {r['data']: r for r in rows}
 
-        # 2. Simula do início do sistema ATÉ o início do relatório (para pegar saldos iniciais)
-        saldo_bh_simulado = func_info.get('banco_horas_inicial', 0)
-        saldo_extras_simulado = func_info.get('extras_disponiveis_inicial', 0)
-        
-        sim_start_dt = datetime.strptime(SYSTEM_START_DATE, "%Y-%m-%d").date()
-        sim_end_dt = start_date - timedelta(days=1) # Simula ATÉ a véspera
-        current_sim_iter = sim_start_dt
-        
-        if sim_start_dt <= sim_end_dt:
-            while current_sim_iter <= sim_end_dt:
-                data_str = current_sim_iter.isoformat()
-                
-                if current_sim_iter == SYSTEM_CURRENT_DATE:
-                    current_sim_iter += timedelta(days=1)
-                    continue
-                
-                expected_minutes = self.get_expected_daily_minutes(data_str, is_fichado, matricula)
-                minutos_trabalhados_dia = work_map.get(data_str, {}).get('minutos', 0)
-                excedente_dia = minutos_trabalhados_dia - expected_minutes
-                saldo_bh_simulado += excedente_dia
+        bh_start, extras_start, _ = self.get_balance_snapshot_before_date(matricula, start_dt)
 
-                while saldo_bh_simulado >= MINUTOS_UNIDADE_EXTRA:
-                    saldo_bh_simulado -= MINUTOS_UNIDADE_EXTRA
-                    saldo_extras_simulado += 1
-                while saldo_bh_simulado < 0 and saldo_extras_simulado > 0:
-                    saldo_bh_simulado += MINUTOS_UNIDADE_EXTRA
-                    saldo_extras_simulado -= 1
+        if rows:
+            bh_end = float(rows[-1].get('saldo_acumulado_bh', 0) or 0)
+            extras_end = int(rows[-1].get('extras_acumuladas', 0) or 0)
+        else:
+            bh_end = bh_start
+            extras_end = extras_start
 
-                punicao_do_dia = punicoes_map.get(data_str, 0)
-                if punicao_do_dia > 0:
-                    saldo_bh_simulado -= punicao_do_dia
-                    while saldo_bh_simulado < 0 and saldo_extras_simulado > 0:
-                        saldo_bh_simulado += MINUTOS_UNIDADE_EXTRA
-                        saldo_extras_simulado -= 1
-                        
-                current_sim_iter += timedelta(days=1)
-        
-        stats['bh_start'] = saldo_bh_simulado
-        stats['extras_start'] = saldo_extras_simulado
+        dias_trabalhados = 0
+        faltas_abonadas = 0
+        faltas_nao_abonadas = 0
+        minutos_abonados_total = 0.0
+        punicoes_min = 0.0
+        atrasos_deduzidos_min = 0.0
+        dias_com_atraso = 0
+        extras_geradas_periodo = max(0, extras_end - extras_start)
 
-        # 3. Simula DENTRO do período do relatório (para pegar estatísticas e saldos finais)
-        current_date_iter = start_date
-        while current_date_iter <= end_date:
-            data_str = current_date_iter.isoformat()
-            
-            if current_date_iter == SYSTEM_CURRENT_DATE:
-                 current_date_iter += timedelta(days=1)
-                 continue
+        current = start_dt
+        while current <= end_dt:
+            data_str = current.isoformat()
+            row = row_map.get(data_str)
+            expected = float((row or {}).get('minutos_esperados', 0) or 0)
+            worked = float((row or {}).get('minutos_trabalhados', 0) or 0)
+            pun = float((row or {}).get('minutos_punicao', 0) or 0)
+            atraso = float((row or {}).get('minutos_atraso', 0) or 0)
+            abono = float((row or {}).get('minutos_abono', 0) or 0)
 
-            # Pega expectativa (já com abono subtraído)
-            expected_minutes = self.get_expected_daily_minutes(data_str, is_fichado, matricula)
-            
-            # Pega expectativa (sem abono) para contagem de faltas
-            date_dt = current_date_iter
-            expected_minutes_raw = 0
-            if date_dt.weekday() != 6: # Não é Domingo
-                is_holiday_today = self.is_holiday(data_str)
-                if not (is_holiday_today and is_fichado): # Não é feriado para fichado
-                    if date_dt.weekday() < 5: expected_minutes_raw = MINUTOS_JORNADA_SEG_SEX
-                    elif date_dt.weekday() == 5: expected_minutes_raw = MINUTOS_JORNADA_SABADO
-            
-            dados_dia = work_map.get(data_str)
-            minutos_trabalhados_dia = dados_dia.get('minutos', 0) if dados_dia else 0
-            
-            # Pega minutos abonados para estatística
-            abono_min_dia = abonos_map.get(data_str, 0)
-            stats['minutos_abonados_total'] += abono_min_dia
+            minutos_abonados_total += abono
+            punicoes_min += pun
+            atrasos_deduzidos_min += atraso
 
-            # Contabiliza Faltas
-            if expected_minutes_raw > 0 and minutos_trabalhados_dia == 0:
-                if abono_min_dia > 0:
-                    stats['faltas_abonadas'] += 1 # Se teve qualquer abono e não veio, é falta abonada
+            if worked > 0:
+                dias_trabalhados += 1
+            if atraso > 0:
+                dias_com_atraso += 1
+
+            if expected > 0 and worked == 0:
+                if abono > 0:
+                    faltas_abonadas += 1
                 else:
-                    stats['faltas_nao_abonadas'] += 1
-            elif minutos_trabalhados_dia > 0:
-                stats['dias_trabalhados'] += 1
+                    faltas_nao_abonadas += 1
 
-            # Contabiliza Atrasos
-            if dados_dia and dados_dia['periodos']:
-                try:
-                    periods_json = json.loads(dados_dia['periodos'])
-                    deducao_dia = 0
-                    for p in periods_json:
-                        deducao_dia += parse_hhmm_to_minutes(p.get('deducao_minutos', '00:00:00'))
-                    if deducao_dia > 0:
-                        stats['dias_com_atraso'] += 1
-                        stats['atrasos_deduzidos_min'] += deducao_dia
-                except:
-                    pass
+            current += timedelta(days=1)
 
-            # Simula Saldo
-            excedente_dia = minutos_trabalhados_dia - expected_minutes # 'expected_minutes' já tem o abono
-            saldo_bh_simulado += excedente_dia
+        saturday_suggestions = self.get_saturday_exit_suggestions_for_period(matricula, start_dt, end_dt)
 
-            while saldo_bh_simulado >= MINUTOS_UNIDADE_EXTRA:
-                saldo_bh_simulado -= MINUTOS_UNIDADE_EXTRA
-                saldo_extras_simulado += 1
-                stats['extras_geradas_periodo'] += 1
-            while saldo_bh_simulado < 0 and saldo_extras_simulado > 0:
-                saldo_bh_simulado += MINUTOS_UNIDADE_EXTRA
-                saldo_extras_simulado -= 1
-                stats['extras_geradas_periodo'] -= 1
+        c.execute(
+            """
+            SELECT *
+            FROM checkpoints_semanais
+            WHERE matricula = ? AND data_checkpoint BETWEEN ? AND ?
+            ORDER BY data_checkpoint ASC
+            """,
+            (matricula, start_dt.isoformat(), end_dt.isoformat())
+        )
+        checkpoints = [dict(r) for r in c.fetchall()]
 
-            punicao_do_dia = punicoes_map.get(data_str, 0)
-            if punicao_do_dia > 0:
-                stats['punicoes_count'] += 1
-                stats['punicoes_min'] += punicao_do_dia
-                
-                saldo_bh_simulado -= punicao_do_dia
-                while saldo_bh_simulado < 0 and saldo_extras_simulado > 0:
-                    saldo_bh_simulado += MINUTOS_UNIDADE_EXTRA
-                    saldo_extras_simulado -= 1
-                    stats['extras_geradas_periodo'] -= 1
+        return {
+            'matricula': matricula,
+            'nome': func_info.get('nome', 'N/D'),
+            'start_date': start_dt,
+            'end_date': end_dt,
+            'dias_trabalhados': dias_trabalhados,
+            'faltas_abonadas': faltas_abonadas,
+            'faltas_nao_abonadas': faltas_nao_abonadas,
+            'minutos_abonados_total': minutos_abonados_total,
+            'punicoes_min': punicoes_min,
+            'punicoes_count': sum(1 for r in rows if float(r.get('minutos_punicao', 0) or 0) > 0),
+            'atrasos_deduzidos_min': atrasos_deduzidos_min,
+            'dias_com_atraso': dias_com_atraso,
+            'bh_start': bh_start,
+            'bh_end': bh_end,
+            'extras_start': extras_start,
+            'extras_end': extras_end,
+            'extras_geradas_periodo': extras_geradas_periodo,
+            'daily_rows': rows,
+            'checkpoints': checkpoints,
+            'saturday_suggestions': saturday_suggestions
+        }
 
-            current_date_iter += timedelta(days=1)
 
-        stats['bh_end'] = saldo_bh_simulado
-        stats['extras_end'] = saldo_extras_simulado
-        stats['extras_geradas_periodo'] = stats['extras_end'] - stats['extras_start']
-
-        return stats
-
-# --- Função import_glog_txt ---
 def import_glog_txt(filepath, db_manager, logger=print):
+    """
+    Importa arquivo GLog/TXT de batidas.
+
+    Regras:
+    - aceita arquivos com separador por TAB ou espaços múltiplos
+    - agrupa batidas por funcionário e por dia
+    - gera períodos sequenciais entrada/saída
+    - calcula minutos líquidos com a mesma regra de atraso já usada no sistema
+    - respeita o marco zero do sistema vindo do banco
+    """
     employees_points_raw = defaultdict(lambda: defaultdict(list))
     unique_employees = set()
+
+    def _safe_log(msg):
+        try:
+            logger(msg)
+        except Exception:
+            pass
+
     try:
-        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f.readlines()[1:]:
-                parts = re.split(r'\s+', line.strip())
-                if len(parts) < 8: continue
-                try:
-                    matricula = str(parts[2]).zfill(8)
-                    nome = str(parts[3]).strip()
-                    dt_str = f"{parts[6]} {parts[7]}"
-                    dt = try_parse_datetime(dt_str)
-                    if dt and dt.date() >= datetime.strptime(SYSTEM_START_DATE, "%Y-%m-%d").date():
-                        unique_employees.add((matricula, nome))
-                        employees_points_raw[matricula][dt.date().isoformat()].append({"datetime": dt})
-                except: continue
+        start_dt = db_manager.get_system_start_date() if hasattr(db_manager, 'get_system_start_date') else datetime.strptime(SYSTEM_START_DATE, "%Y-%m-%d").date()
+    except Exception:
+        start_dt = datetime.strptime("2025-01-01", "%Y-%m-%d").date()
+
+    try:
+        with open(filepath, 'r', encoding='utf-8-sig', errors='ignore') as f:
+            lines = f.readlines()
     except Exception as e:
-        logger(f"ERRO LEITURA: {e}"); return [], set()
+        _safe_log(f"ERRO LEITURA: {e}")
+        return [], set()
+
+    if not lines:
+        _safe_log("Arquivo vazio.")
+        return [], set()
+
+    for raw_line in lines[1:]:
+        line = raw_line.strip().replace('﻿', '')
+        if not line:
+            continue
+
+        parts = [p.strip() for p in re.split(r'	+', line) if p.strip()]
+        if len(parts) >= 7:
+            try:
+                matricula = str(parts[2]).zfill(8)
+                nome = str(parts[3]).strip()
+                dt_str = f"{parts[-2]} {parts[-1]}"
+                dt = try_parse_datetime(dt_str)
+                if not dt or dt.date() < start_dt:
+                    continue
+                unique_employees.add((matricula, nome))
+                employees_points_raw[matricula][dt.date().isoformat()].append({"datetime": dt})
+                continue
+            except Exception:
+                pass
+
+        parts = [p for p in re.split(r'\s+', line) if p]
+        if len(parts) < 8:
+            continue
+        try:
+            matricula = str(parts[2]).zfill(8)
+            nome = str(parts[3]).strip()
+            dt_str = f"{parts[6]} {parts[7]}"
+            dt = try_parse_datetime(dt_str)
+            if not dt or dt.date() < start_dt:
+                continue
+            unique_employees.add((matricula, nome))
+            employees_points_raw[matricula][dt.date().isoformat()].append({"datetime": dt})
+        except Exception:
+            continue
 
     existing_matriculas = db_manager.get_all_funcionarios_matriculas()
-    new_employees_list = [(m, n) for m, n in unique_employees if m not in existing_matriculas]
-    processed_matriculas = set(m for m, n in unique_employees)
+    new_employees_list = sorted([(m, n) for m, n in unique_employees if m not in existing_matriculas], key=lambda x: x[0])
+    processed_matriculas = set(m for m, _ in unique_employees)
 
     for matricula, dias in sorted(employees_points_raw.items()):
         func_info = db_manager.get_funcionario_info(matricula)
-        sector = func_info.get('setor', 'N/D') if func_info else 'N/D'
+        setor = func_info.get('setor', 'N/D') if func_info else 'N/D'
 
         for data, pontos_brutos in sorted(dias.items()):
-            pontos_brutos.sort(key=lambda x: x["datetime"])
-            periodos_trabalhados = []
-            minutos_trabalhados_total = 0
-            horarios = [p["datetime"] for p in pontos_brutos]
+            pontos_brutos.sort(key=lambda x: x['datetime'])
+            horarios = [p['datetime'] for p in pontos_brutos]
+            if not horarios:
+                continue
 
+            periodos_trabalhados = []
+            minutos_trabalhados_total = 0.0
             i = 0
             while i < len(horarios):
                 entrada = horarios[i]
-                saida = horarios[i+1] if i + 1 < len(horarios) else None
-                
-                # USA A NOVA FUNÇÃO (Correção Iggor)
-                bruto, liquido, deducao = calculate_period_data(entrada, saida, data, i, sector)
-                
-                if saida and saida < entrada: i += 2; continue
+                saida = horarios[i + 1] if i + 1 < len(horarios) else None
 
+                if saida and saida < entrada:
+                    i += 1
+                    continue
+
+                bruto, liquido, deducao = calculate_period_data(entrada, saida, data, i, setor)
                 minutos_trabalhados_total += liquido
-                
                 periodos_trabalhados.append({
-                    "entrada": str(entrada),
-                    "saida": str(saida) if saida else None,
-                    "minutos_brutos": format_minutes_to_hms(bruto),
-                    "deducao_minutos": format_minutes_to_hms(deducao),
-                    "minutos_liquidos": format_minutes_to_hms(liquido)
+                    'entrada': entrada.strftime('%Y-%m-%d %H:%M:%S') if entrada else None,
+                    'saida': saida.strftime('%Y-%m-%d %H:%M:%S') if saida else None,
+                    'minutos_brutos': format_minutes_to_hms(bruto),
+                    'deducao_minutos': format_minutes_to_hms(deducao),
+                    'minutos_liquidos': format_minutes_to_hms(liquido)
                 })
                 i += 2 if saida else 1
 
             if periodos_trabalhados:
-                # Mantém flag ignorar_atraso se existir
                 db_manager.insert_horas_trabalhadas({
-                    "matricula": matricula, "data": data,
-                    "minutos_totais": format_minutes_to_hms(minutos_trabalhados_total),
-                    "periodos": periodos_trabalhados
+                    'matricula': matricula,
+                    'data': data,
+                    'minutos_totais': format_minutes_to_hms(minutos_trabalhados_total),
+                    'periodos': periodos_trabalhados
                 })
 
+    _safe_log(f"Importação TXT concluída. Funcionários processados: {len(processed_matriculas)}")
     return new_employees_list, processed_matriculas
 
-# --- Classe DateRangePicker ---
 class DateRangePicker:
-    """Um widget de calendário reutilizável que seleciona um intervalo de datas."""
     def __init__(self, parent, bg_color, style_colors): # Removido system_start_date_str
         self.frame = tk.Frame(parent, bg=bg_color)
         self.selected_start_date = None
@@ -1997,7 +2472,7 @@ class App:
         if self.db.toggle_ignore_delay(matricula, data_db):
             self.append_log(f"Status de atraso alterado para {matricula} em {data_db}. Recalculando...")
             # Recalcula o saldo total
-            self.db.recalculate_full_balance_for_employee(matricula)
+            self.db.recalculate_full_balance_for_employee(matricula, recalc_from_date=data_db)
             # Recarrega a tela para mostrar os novos valores (sem a multiplicação)
             self.load_point_viewer(force_reload=True)
             messagebox.showinfo("Sucesso", "Status de atraso alterado! A multiplicação foi removida/adicionada para este dia.")
@@ -2323,7 +2798,7 @@ class App:
             if matricula_afetada:
                 self.append_log(f"PUNIÇÃO REMOVIDA: {desc}. Recalculando...")
                 try:
-                    self.db.recalculate_full_balance_for_employee(matricula_afetada)
+                    self.db.recalculate_full_balance_for_employee(matricula_afetada, recalc_from_date=item_data[0] if 'item_data' in locals() else None)
                     self.append_log(f"Recálculo de {matricula_afetada} concluído.")
                     messagebox.showinfo("Sucesso", "Punição removida e saldo recalculado!", parent=win)
                     refresh_punicao_list() # Atualiza a lista
@@ -3447,7 +3922,7 @@ class App:
             try:
                 if self.db.update_initial_balances(matricula, bh_minutos, extras_int):
                     self.append_log(f"Saldos iniciais de {matricula} atualizados. Recalculando...")
-                    self.db.recalculate_full_balance_for_employee(matricula)
+                    self.db.recalculate_full_balance_for_employee(matricula, recalc_from_date=self.db.get_system_start_date().isoformat())
                     self.append_log(f"Recálculo de {matricula} concluído.")
                     messagebox.showinfo("Sucesso", "Saldos iniciais atualizados e saldo total recalculado!", parent=win)
                     self.load_point_viewer(force_reload=True)
@@ -3621,7 +4096,7 @@ class App:
             if self.db.add_abono(matricula, data_str, motivo, minutos_abonados): # <-- PARÂMETRO ADICIONADO
                 self.append_log(f"ABONO REGISTRADO: {matricula} - {data_str} - {format_minutes_to_hms(minutos_abonados)} - {motivo}. Recalculando...")
                 try:
-                    self.db.recalculate_full_balance_for_employee(matricula)
+                    self.db.recalculate_full_balance_for_employee(matricula, recalc_from_date=self.db.get_system_start_date().isoformat())
                     self.append_log(f"Recálculo de {matricula} concluído.")
                     messagebox.showinfo("Sucesso", "Abono salvo e saldo recalculado!", parent=win)
                     refresh_abono_list()
@@ -3653,7 +4128,7 @@ class App:
             if matricula_afetada:
                 self.append_log(f"ABONO REMOVIDO: {desc}. Recalculando...")
                 try:
-                    self.db.recalculate_full_balance_for_employee(matricula_afetada)
+                    self.db.recalculate_full_balance_for_employee(matricula_afetada, recalc_from_date=item_data[0] if 'item_data' in locals() else None)
                     self.append_log(f"Recálculo de {matricula_afetada} concluído.")
                     messagebox.showinfo("Sucesso", "Abono removido e saldo recalculado!", parent=win)
                     refresh_abono_list()
@@ -3672,10 +4147,16 @@ class App:
             cmb_func.set(self.cmb_filter_func.get())
             refresh_abono_list()
 
+
     def on_detailed_report(self):
-        win = tk.Toplevel(self.root); win.title("Relatório Detalhado")
-        win.configure(bg=self.BG_COLOR); win.state('zoomed'); win.minsize(1024, 768)
-        win.resizable(False, False); win.transient(self.root); win.grab_set()
+        win = tk.Toplevel(self.root)
+        win.title("Relatório Detalhado")
+        win.configure(bg=self.BG_COLOR)
+        win.state('zoomed')
+        win.minsize(1024, 768)
+        win.resizable(False, False)
+        win.transient(self.root)
+        win.grab_set()
 
         main_frame = tk.Frame(win, bg=self.BG_COLOR, padx=20, pady=20)
         main_frame.pack(fill=tk.BOTH, expand=True)
@@ -3687,15 +4168,14 @@ class App:
         nomes = [f"{f['matricula']} - {f['nome']}" for f in self.db.get_all_funcionarios()]
         cmb_func = ttk.Combobox(form_frame, values=nomes, state="readonly", width=50)
         cmb_func.pack(anchor="w", pady=(0, 15), padx=10)
-        
+
         if self.cmb_filter_func.get() and self.cmb_filter_func.get() != "Todos":
             cmb_func.set(self.cmb_filter_func.get())
 
         tk.Label(form_frame, text="2. Período:", bg=self.BG_COLOR, fg=self.FG_COLOR, font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 5), padx=10)
-        
         date_picker = DateRangePicker(form_frame, self.BG_COLOR, self.style_colors_dict)
         date_picker.pack(pady=10, padx=10)
-        
+
         if self.selected_start_date:
             date_picker.cal.selection_set(self.selected_start_date)
             date_picker._on_calendar_click()
@@ -3705,7 +4185,7 @@ class App:
 
         btn_generate = ttk.Button(form_frame, text="Gerar PDF", style='TButton')
         btn_generate.pack(pady=20, padx=10)
-        
+
         ttk.Button(form_frame, text="Sair", style='Delete.TButton', command=win.destroy).pack(side=tk.BOTTOM, pady=10, padx=10)
 
         def generate_report():
@@ -3713,10 +4193,10 @@ class App:
             if not selection:
                 messagebox.showerror("Erro", "Selecione um funcionário.", parent=win)
                 return
-                
+
             matricula = selection.split(" - ")[0]
             nome = " ".join(selection.split(" - ")[1:])
-            
+
             start_date, end_date = date_picker.get_dates()
             if not start_date or not end_date or end_date < start_date:
                 messagebox.showerror("Erro", "Selecione um período válido (Início e Fim).", parent=win)
@@ -3741,89 +4221,146 @@ class App:
                 return
 
             try:
-                doc = SimpleDocTemplate(filepath, pagesize=A4, rightMargin=2*cm, leftMargin=2*cm, topMargin=1.5*cm, bottomMargin=1.5*cm)
+                doc = SimpleDocTemplate(filepath, pagesize=A4, rightMargin=1.5*cm, leftMargin=1.5*cm, topMargin=1.2*cm, bottomMargin=1.2*cm)
                 styles = getSampleStyleSheet()
                 story = []
 
                 if LOGO_PATH.exists():
-                    story.append(Image(LOGO_PATH, width=3*cm, height=3*cm, hAlign='CENTER'))
+                    story.append(Image(LOGO_PATH, width=2.5*cm, height=2.5*cm, hAlign='CENTER'))
                     story.append(Spacer(1, 0.2*cm))
 
                 story.append(Paragraph("Relatório Detalhado de Ponto", styles['h1']))
-                story.append(Spacer(1, 1*cm))
-                
+                story.append(Spacer(1, 0.4*cm))
                 story.append(Paragraph(f"<b>Funcionário:</b> {stats['nome']} (Mat. {stats['matricula']})", styles['Normal']))
                 story.append(Paragraph(f"<b>Período:</b> {start_date.strftime('%d/%m/%Y')} a {end_date.strftime('%d/%m/%Y')}", styles['Normal']))
-                story.append(Spacer(1, 1*cm))
+                story.append(Spacer(1, 0.5*cm))
 
-                # --- Tabela de Resumo ---
-                story.append(Paragraph("Resumo do Período", styles['h2']))
-                
                 resumo_data = [
+                    ['Indicador', 'Valor'],
                     ['Dias Trabalhados', f"{stats['dias_trabalhados']}"],
                     ['Faltas (Não Abonadas)', f"{stats['faltas_nao_abonadas']}"],
                     ['Faltas (Abonadas)', f"{stats['faltas_abonadas']}"],
-                    ['Total de Minutos Abonados', f"{format_minutes_to_hms(stats['minutos_abonados_total'])}"], # <-- LINHA ADICIONADA
-                    ['Dias com Atraso (desconto)', f"{stats['dias_com_atraso']}"],
-                    ['Total Deduzido (Atrasos)', f"{format_minutes_to_hms(stats['atrasos_deduzidos_min'])}"],
+                    ['Total de Minutos Abonados', format_minutes_to_hms(stats['minutos_abonados_total'])],
+                    ['Dias com Atraso', f"{stats['dias_com_atraso']}"],
+                    ['Total Deduzido (Atrasos)', format_minutes_to_hms(stats['atrasos_deduzidos_min'])],
                     ['Punições no Período', f"{stats['punicoes_count']}"],
-                    ['Total Deduzido (Punições)', f"{format_minutes_to_hms(stats['punicoes_min'])}"],
+                    ['Total Deduzido (Punições)', format_minutes_to_hms(stats['punicoes_min'])],
+                    ['BH no Início', format_minutes_to_hms(stats['bh_start'])],
+                    ['BH no Fim', format_minutes_to_hms(stats['bh_end'])],
+                    ['Extras no Início', f"{int(stats['extras_start'])} un."],
+                    ['Extras no Fim', f"{int(stats['extras_end'])} un."],
                 ]
-                
-                t_resumo = Table(resumo_data, colWidths=[8*cm, 4*cm])
+                t_resumo = Table(resumo_data, colWidths=[8.5*cm, 6.5*cm])
                 t_resumo.setStyle(TableStyle([
-                    ('GRID', (0,0), (-1,-1), 1, colors.grey),
-                    ('BACKGROUND', (0,0), (0,-1), colors.lightgrey),
-                    ('FONTNAME', (0,0), (0,-1), 'Helvetica-Bold'),
-                    ('ALIGN', (1,0), (1,-1), 'CENTER'),
-                ]))
-                story.append(t_resumo)
-                story.append(Spacer(1, 1*cm))
-                
-                # --- Tabela de Saldos ---
-                story.append(Paragraph("Evolução dos Saldos", styles['h2']))
-                
-                saldo_data = [
-                    ['Item', f"Em {start_date.strftime('%d/%m/%Y')} (Início)", f"Em {end_date.strftime('%d/%m/%Y')} (Fim)", 'Variação no Período'],
-                    ['Banco de Horas', 
-                        format_minutes_to_hms(stats['bh_start']), 
-                        format_minutes_to_hms(stats['bh_end']), 
-                        format_minutes_to_hms(stats['bh_end'] - stats['bh_start'])],
-                    ['Extras Disponíveis', 
-                        f"{int(stats['extras_start'])} un.", 
-                        f"{int(stats['extras_end'])} un.", 
-                        f"{int(stats['extras_geradas_periodo'])} un."]
-                ]
-                
-                t_saldos = Table(saldo_data, colWidths=[4*cm, 4.5*cm, 4.5*cm, 4*cm])
-                t_saldos.setStyle(TableStyle([
                     ('BACKGROUND', (0,0), (-1,0), colors.teal),
                     ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
                     ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-                    ('GRID', (0,0), (-1,-1), 1, colors.black),
-                    ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+                    ('GRID', (0,0), (-1,-1), 1, colors.grey),
+                    ('ALIGN', (1,1), (1,-1), 'CENTER'),
                     ('BACKGROUND', (0,1), (-1,-1), colors.beige),
                 ]))
-                story.append(t_saldos)
-                story.append(Spacer(1, 2.5*cm))
+                story.append(Paragraph("Resumo do Período", styles['h2']))
+                story.append(t_resumo)
+                story.append(Spacer(1, 0.45*cm))
 
+                daily_data = [['Data', 'Trab.', 'Esperado', 'Atraso', 'Punição', 'Saldo Dia', 'BH Acum.', 'Extras']]
+                for row in stats['daily_rows']:
+                    daily_data.append([
+                        datetime.strptime(row['data'], "%Y-%m-%d").strftime("%d/%m/%Y"),
+                        format_minutes_to_hms(row.get('minutos_trabalhados', 0) or 0),
+                        format_minutes_to_hms(row.get('minutos_esperados', 0) or 0),
+                        format_minutes_to_hms(row.get('minutos_atraso', 0) or 0),
+                        format_minutes_to_hms(row.get('minutos_punicao', 0) or 0),
+                        format_minutes_to_hms(row.get('saldo_dia', 0) or 0),
+                        format_minutes_to_hms(row.get('saldo_acumulado_bh', 0) or 0),
+                        str(int(row.get('extras_acumuladas', 0) or 0)),
+                    ])
+                t_daily = Table(daily_data, repeatRows=1, colWidths=[2.1*cm, 2*cm, 2*cm, 1.8*cm, 1.8*cm, 2*cm, 2.1*cm, 1.2*cm])
+                t_daily.setStyle(TableStyle([
+                    ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#1f4e78")),
+                    ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+                    ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                    ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+                    ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+                    ('FONTSIZE', (0,0), (-1,-1), 8),
+                ]))
+                story.append(Paragraph("Fechamento Diário", styles['h2']))
+                story.append(t_daily)
+                story.append(Spacer(1, 0.45*cm))
+
+                if stats['checkpoints']:
+                    checkpoint_data = [['Checkpoint', 'Semana', 'Trab.', 'Esperado', 'Atraso', 'Punição', 'Saldo Sem.', 'BH Final', 'Extras']]
+                    for cp in stats['checkpoints']:
+                        checkpoint_data.append([
+                            datetime.strptime(cp['data_checkpoint'], "%Y-%m-%d").strftime("%d/%m/%Y"),
+                            f"{datetime.strptime(cp['data_inicio_semana'], '%Y-%m-%d').strftime('%d/%m')} a {datetime.strptime(cp['data_fim_semana'], '%Y-%m-%d').strftime('%d/%m')}",
+                            format_minutes_to_hms(cp.get('minutos_trabalhados_semana', 0) or 0),
+                            format_minutes_to_hms(cp.get('minutos_esperados_semana', 0) or 0),
+                            format_minutes_to_hms(cp.get('minutos_atraso_semana', 0) or 0),
+                            format_minutes_to_hms(cp.get('minutos_punicoes_semana', 0) or 0),
+                            format_minutes_to_hms(cp.get('saldo_semana', 0) or 0),
+                            format_minutes_to_hms(cp.get('saldo_final_bh', 0) or 0),
+                            str(int(cp.get('extras_finais', 0) or 0)),
+                        ])
+                    t_cp = Table(checkpoint_data, repeatRows=1, colWidths=[2*cm, 3.1*cm, 1.7*cm, 1.8*cm, 1.6*cm, 1.6*cm, 1.8*cm, 1.8*cm, 1.1*cm])
+                    t_cp.setStyle(TableStyle([
+                        ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#0b6e4f")),
+                        ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+                        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                        ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+                        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+                        ('FONTSIZE', (0,0), (-1,-1), 8),
+                    ]))
+                    story.append(Paragraph("Checkpoints Semanais", styles['h2']))
+                    story.append(t_cp)
+                    story.append(Spacer(1, 0.45*cm))
+
+                if stats['saturday_suggestions']:
+                    sat_data = [['Data', 'Entrada', 'BH Início', 'Extras Início', 'Compensável', 'Min. a Trabalhar', 'Saída Sugerida', 'Observação']]
+                    for s in stats['saturday_suggestions']:
+                        sat_data.append([
+                            datetime.strptime(s['data'], "%Y-%m-%d").strftime("%d/%m/%Y"),
+                            s['entrada'],
+                            format_minutes_to_hms(s['bh_disponivel_inicio']),
+                            str(int(s['extras_disponiveis_inicio'])),
+                            format_minutes_to_hms(s['minutos_compensaveis']),
+                            format_minutes_to_hms(s['minutos_a_trabalhar']),
+                            s['saida_sugerida'],
+                            s['observacao']
+                        ])
+                    t_sat = Table(sat_data, repeatRows=1, colWidths=[1.8*cm, 1.5*cm, 1.9*cm, 1.7*cm, 2*cm, 2*cm, 2*cm, 4.1*cm])
+                    t_sat.setStyle(TableStyle([
+                        ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#7f5539")),
+                        ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+                        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                        ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+                        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                        ('ALIGN', (0,0), (6,-1), 'CENTER'),
+                        ('FONTSIZE', (0,0), (-1,-1), 8),
+                    ]))
+                    story.append(Paragraph("Sugestão de Saída aos Sábados", styles['h2']))
+                    story.append(Paragraph("A sugestão considera a entrada real no sábado e o saldo disponível no início do dia.", styles['Normal']))
+                    story.append(t_sat)
+                    story.append(Spacer(1, 0.45*cm))
+
+                story.append(Spacer(1, 0.9*cm))
                 story.append(Paragraph("________________________________________", styles['Normal']))
                 story.append(Paragraph(stats['nome'], styles['Normal']))
                 story.append(Paragraph(f"Data: ____/____/{datetime.now().year}", styles['Normal']))
 
                 doc.build(story)
-                messagebox.showinfo("Sucesso", f"Relatório salvo com sucesso!", parent=win)
+                messagebox.showinfo("Sucesso", "Relatório salvo com sucesso!", parent=win)
                 self.append_log("Relatório PDF gerado.")
                 win.destroy()
 
             except PermissionError:
-                 messagebox.showerror("Erro", f"Erro de Permissão.\nO arquivo '{filepath}' pode estar aberto. Feche-o e tente novamente.", parent=win)
+                messagebox.showerror("Erro", f"Erro de Permissão.\nO arquivo '{filepath}' pode estar aberto. Feche-o e tente novamente.", parent=win)
             except Exception as e:
                 messagebox.showerror("Erro PDF", f"Não foi possível gerar o PDF: {e}", parent=win)
                 self.append_log(f"ERRO PDF: {e}")
 
         btn_generate.config(command=generate_report)
-    
+
     def on_reverse_payment(self):
         win = tk.Toplevel(self.root); win.title("Desfazer (Estornar) Pagamento")
         win.configure(bg=self.BG_COLOR); win.state('zoomed'); win.minsize(1024, 768)
@@ -3952,7 +4489,7 @@ class App:
                 matricula_afetada = message
                 self.append_log(f"ESTORNO REALIZADO: Log {log_id}. Recalculando {matricula_afetada}...")
                 try:
-                    self.db.recalculate_full_balance_for_employee(matricula_afetada)
+                    self.db.recalculate_full_balance_for_employee(matricula_afetada, recalc_from_date=item_data[0] if 'item_data' in locals() else None)
                     self.append_log(f"Recálculo de {matricula_afetada} concluído.")
                     messagebox.showinfo("Sucesso", "Pagamento estornado e saldo recalculado!", parent=win)
                     refresh_payment_logs() # Atualiza a lista
@@ -4148,9 +4685,41 @@ class App:
         frame_saldos.grid(row=2, column=0, sticky="ew", pady=(10, 5), padx=10)
         tk.Label(frame_saldos, text="BH:", font=("Segoe UI", 11), bg="#0a192f", fg="white").pack(side=tk.LEFT, padx=(10,0)); self.lbl_saldo_bh_total = tk.Label(frame_saldos, text="--:--:--", font=("Segoe UI", 11, "bold"), bg="#0a192f", fg="white", width=15, anchor="w"); self.lbl_saldo_bh_total.pack(side=tk.LEFT, padx=(5, 20)); tk.Label(frame_saldos, text="Extras:", font=("Segoe UI", 11), bg="#0a192f", fg="white").pack(side=tk.LEFT); self.lbl_saldo_extras_total = tk.Label(frame_saldos, text="--", font=("Segoe UI", 11, "bold"), bg="#0a192f", fg="white", width=10, anchor="w"); self.lbl_saldo_extras_total.pack(side=tk.LEFT, padx=(5, 20)); tk.Label(frame_saldos, text="Fichado:", font=("Segoe UI", 11), bg="#0a192f", fg="white").pack(side=tk.LEFT); self.lbl_fichado_status = tk.Label(frame_saldos, text="--", font=("Segoe UI", 11, "bold"), bg="#0a192f", fg="white", width=10, anchor="w"); self.lbl_fichado_status.pack(side=tk.LEFT, padx=(5, 20)); tk.Label(frame_saldos, text="Setor:", font=("Segoe UI", 11), bg="#0a192f", fg="white").pack(side=tk.LEFT); self.lbl_setor_status = tk.Label(frame_saldos, text="--", font=("Segoe UI", 11, "bold"), bg="#0a192f", fg="white", width=15, anchor="w"); self.lbl_setor_status.pack(side=tk.LEFT, padx=5)
 
+        frame_sabado = ttk.LabelFrame(frame_viewer, text=" Validação de Sábado ", style='TLabelframe')
+        frame_sabado.grid(row=3, column=0, sticky="ew", pady=(0, 5), padx=10)
+        frame_sabado.grid_columnconfigure(1, weight=1)
+        frame_sabado.grid_columnconfigure(3, weight=1)
+
+        tk.Label(frame_sabado, text="Data:", font=("Segoe UI", 10), bg="#0a192f", fg="white").grid(row=0, column=0, sticky="w", padx=(10, 5), pady=4)
+        self.lbl_sabado_data = tk.Label(frame_sabado, text="--/--/----", font=("Segoe UI", 10, "bold"), bg="#0a192f", fg="white", anchor="w")
+        self.lbl_sabado_data.grid(row=0, column=1, sticky="w", padx=(0, 15), pady=4)
+
+        tk.Label(frame_sabado, text="Entrada:", font=("Segoe UI", 10), bg="#0a192f", fg="white").grid(row=0, column=2, sticky="w", padx=(10, 5), pady=4)
+        self.lbl_sabado_entrada = tk.Label(frame_sabado, text="--:--", font=("Segoe UI", 10, "bold"), bg="#0a192f", fg="white", anchor="w")
+        self.lbl_sabado_entrada.grid(row=0, column=3, sticky="w", padx=(0, 15), pady=4)
+
+        tk.Label(frame_sabado, text="BH início:", font=("Segoe UI", 10), bg="#0a192f", fg="white").grid(row=1, column=0, sticky="w", padx=(10, 5), pady=4)
+        self.lbl_sabado_bh_inicio = tk.Label(frame_sabado, text="00:00:00", font=("Segoe UI", 10, "bold"), bg="#0a192f", fg="white", anchor="w")
+        self.lbl_sabado_bh_inicio.grid(row=1, column=1, sticky="w", padx=(0, 15), pady=4)
+
+        tk.Label(frame_sabado, text="Extras início:", font=("Segoe UI", 10), bg="#0a192f", fg="white").grid(row=1, column=2, sticky="w", padx=(10, 5), pady=4)
+        self.lbl_sabado_extras_inicio = tk.Label(frame_sabado, text="0", font=("Segoe UI", 10, "bold"), bg="#0a192f", fg="white", anchor="w")
+        self.lbl_sabado_extras_inicio.grid(row=1, column=3, sticky="w", padx=(0, 15), pady=4)
+
+        tk.Label(frame_sabado, text="Min. compensados:", font=("Segoe UI", 10), bg="#0a192f", fg="white").grid(row=2, column=0, sticky="w", padx=(10, 5), pady=4)
+        self.lbl_sabado_compensados = tk.Label(frame_sabado, text="00:00:00", font=("Segoe UI", 10, "bold"), bg="#0a192f", fg="#64ffda", anchor="w")
+        self.lbl_sabado_compensados.grid(row=2, column=1, sticky="w", padx=(0, 15), pady=4)
+
+        tk.Label(frame_sabado, text="Saída sugerida:", font=("Segoe UI", 10), bg="#0a192f", fg="white").grid(row=2, column=2, sticky="w", padx=(10, 5), pady=4)
+        self.lbl_sabado_saida_sugerida = tk.Label(frame_sabado, text="11:30", font=("Segoe UI", 10, "bold"), bg="#0a192f", fg="#ffd166", anchor="w")
+        self.lbl_sabado_saida_sugerida.grid(row=2, column=3, sticky="w", padx=(0, 15), pady=4)
+
+        self.lbl_sabado_obs = tk.Label(frame_sabado, text="Selecione um funcionário e um período com sábado para ver a sugestão.", font=("Segoe UI", 9), bg="#0a192f", fg="#ccd6f6", anchor="w", justify=tk.LEFT)
+        self.lbl_sabado_obs.grid(row=3, column=0, columnspan=4, sticky="ew", padx=10, pady=(2, 8))
+
         # Treeview (Tabela)
         tree_frame = tk.Frame(frame_viewer, bg="#0a192f");
-        tree_frame.grid(row=3, column=0, sticky="nsew", padx=10, pady=10)
+        tree_frame.grid(row=4, column=0, sticky="nsew", padx=10, pady=10)
         tree_frame.grid_rowconfigure(0, weight=1)
         tree_frame.grid_columnconfigure(0, weight=1)
 
@@ -4252,6 +4821,43 @@ class App:
     def update_employee_filter(self):
         funcionarios = self.db.get_all_funcionarios(); nomes = ["Todos"] + [f"{f['matricula']} - {f['nome']}" for f in funcionarios]; self.cmb_filter_func['values'] = nomes; self.cmb_filter_func.set("Todos")
 
+    def update_saturday_suggestion_panel(self, target_matricula, start_date, end_date):
+        self.lbl_sabado_data.config(text="--/--/----")
+        self.lbl_sabado_entrada.config(text="--:--")
+        self.lbl_sabado_bh_inicio.config(text="00:00:00")
+        self.lbl_sabado_extras_inicio.config(text="0")
+        self.lbl_sabado_compensados.config(text="00:00:00")
+        self.lbl_sabado_saida_sugerida.config(text="11:30")
+        self.lbl_sabado_obs.config(text="Selecione um funcionário e um período com sábado para ver a sugestão.")
+
+        if not target_matricula or not start_date or not end_date:
+            return
+
+        try:
+            suggestions = self.db.get_saturday_exit_suggestions_for_period(target_matricula, start_date, end_date)
+        except Exception as e:
+            self.lbl_sabado_obs.config(text=f"Erro ao calcular sábado: {e}")
+            return
+
+        if not suggestions:
+            self.lbl_sabado_obs.config(text="Nenhum sábado encontrado no período selecionado.")
+            return
+
+        sug = suggestions[-1]
+        data_fmt = "--/--/----"
+        try:
+            data_fmt = datetime.strptime(sug['data'], "%Y-%m-%d").strftime("%d/%m/%Y")
+        except Exception:
+            pass
+
+        self.lbl_sabado_data.config(text=data_fmt)
+        self.lbl_sabado_entrada.config(text=sug.get('entrada', '--:--'))
+        self.lbl_sabado_bh_inicio.config(text=format_minutes_to_hms(sug.get('bh_disponivel_inicio', 0) or 0))
+        self.lbl_sabado_extras_inicio.config(text=str(int(sug.get('extras_disponiveis_inicio', 0) or 0)))
+        self.lbl_sabado_compensados.config(text=format_minutes_to_hms(sug.get('minutos_compensaveis', 0) or 0))
+        self.lbl_sabado_saida_sugerida.config(text=sug.get('saida_sugerida', '11:30'))
+        self.lbl_sabado_obs.config(text=sug.get('observacao', 'Saída sugerida calculada com base no saldo no início do sábado.'))
+
     def load_point_viewer(self, force_reload=False):
         if self.unsaved_edits and not force_reload:
             if not messagebox.askyesno("Atualizar", "Alterações não salvas serão perdidas. Continuar?"): return
@@ -4296,8 +4902,13 @@ class App:
             else:
                 self.lbl_saldo_bh_total.config(text="--:--:--")
                 self.lbl_saldo_extras_total.config(text="--")
+                self.lbl_fichado_status.config(text="--")
+                self.lbl_setor_status.config(text="--")
+
+            self.update_saturday_suggestion_panel(target_matricula, start_date, end_date)
 
         except Exception as e:
+            self.update_saturday_suggestion_panel(None, None, None)
             self.append_log(f"Erro ao carregar panorama: {e}")
     
     def on_export_panorama(self):
@@ -4391,35 +5002,25 @@ class App:
 
             # --- DETALHAMENTO COM SUGESTÃO DE SAÍDA ---
             story.append(Paragraph("Resumo do Saldo", styles['h2']))
-            
-            # Cálculo da Saída Sugerida (Sábado)
-            base_date = end_date
-            next_sat = self.find_next_business_day(base_date, is_fichado)
-            
-            if next_sat.weekday() == 5: # Se o próximo dia útil for sábado
-                if saldo_bh_atual_min > 0:
-                    # Pode usar até 4h (240 min) de banco de horas no sábado
-                    minutos_abono = min(saldo_bh_atual_min, 240)
-                    saida_padrao = datetime.combine(next_sat, time(11, 30))
-                    hora_sugerida = (saida_padrao - timedelta(minutes=minutos_abono)).strftime('%H:%M')
-                    msg_saida = f"{hora_sugerida} (Usa {format_minutes_to_hms(minutos_abono)} de BH)"
-                else:
-                    msg_saida = "11:30 (Padrão)"
-            else:
-                msg_saida = "N/A (Próximo dia útil não é sábado)"
+
+            sugestao_ref = self.db.get_exit_suggestion_for_reference_date(matricula, end_date)
+            msg_saida = sugestao_ref['saida_sugerida']
+            if sugestao_ref['saida_padrao'] != '--:--':
+                msg_saida = f"{sugestao_ref['saida_sugerida']} (Padrão {sugestao_ref['saida_padrao']} | Usa {format_minutes_to_hms(sugestao_ref['minutos_creditados'])} de BH)"
 
             detalhes_data = [
                 ["Carga Exigida no Período:", format_minutes_to_hms(total_exigido_min)],
                 ["Carga Trabalhada no Período:", format_minutes_to_hms(total_trabalhado_min)],
                 ["Saldo Atual Banco de Horas:", format_minutes_to_hms(saldo_bh_atual_min)],
-                ["Sugestão de Saída (Próximo Sábado):", msg_saida]
+                ["BH no início do último dia:", format_minutes_to_hms(sugestao_ref['bh_inicio'])],
+                ["Sugestão de Saída (Último dia do filtro):", msg_saida]
             ]
 
             t_det = Table(detalhes_data, colWidths=[8*cm, 6*cm])
             t_det.setStyle(TableStyle([
                 ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
                 ('FONTNAME', (0,0), (0,-1), 'Helvetica-Bold'),
-                ('BACKGROUND', (0,3), (1,3), colors.navajowhite), # Destaque na sugestão
+                ('BACKGROUND', (0,4), (1,4), colors.navajowhite), # Destaque na sugestão
             ]))
             story.append(t_det)
 
@@ -4668,16 +5269,10 @@ class App:
         self.tree_viewer.item(item_id, values=tuple(new_values))
 
 
+
     def process_manual_update_and_save(self, matricula, data_db, all_times_raw, justificativa, desconto_manual=None):
         """
-        Processa ajuste manual de batidas, salva o dia e recalcula o saldo total do funcionário.
-
-        Regras:
-        - recalcula corretamente E1/S1/E2/S2;
-        - aplica multiplicador de atraso por setor;
-        - aceita desconto manual, que prevalece quando informado;
-        - grava horas_trabalhadas;
-        - reprocessa o saldo total e persiste em funcionarios.
+        Processa ajuste manual de batidas, salva o dia e recalcula sequencialmente do dia alterado até hoje.
         """
         try:
             matricula = str(matricula).split(" - ")[0].strip()
@@ -4694,7 +5289,7 @@ class App:
             tempos = [(t or "").strip() for t in tempos]
             tempos_normalizados = []
             for t in tempos:
-                if t in ("N/A", "00:00", ""):
+                if t in ("N/A", "00:00", "00:00:00", ""):
                     tempos_normalizados.append("")
                 else:
                     tempos_normalizados.append(t)
@@ -4702,6 +5297,7 @@ class App:
             periodos = []
             minutos_totais_brutos = 0.0
             minutos_totais_deducao = 0.0
+            minutos_totais_liquidos = 0.0
 
             pares = [
                 ("07:30", tempos_normalizados[0], tempos_normalizados[1], 0),
@@ -4712,69 +5308,61 @@ class App:
                 if not entrada_raw:
                     continue
 
-                try:
-                    entrada = datetime.strptime(f"{data_db} {entrada_raw}", "%Y-%m-%d %H:%M")
-                except ValueError:
+                entrada = None
+                for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
+                    try:
+                        entrada = datetime.strptime(f"{data_db} {entrada_raw}", fmt)
+                        break
+                    except Exception:
+                        continue
+                if not entrada:
                     continue
 
                 saida = None
                 if saida_raw:
-                    try:
-                        saida = datetime.strptime(f"{data_db} {saida_raw}", "%Y-%m-%d %H:%M")
-                        if saida < entrada:
-                            saida += timedelta(days=1)
-                    except ValueError:
-                        saida = None
+                    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
+                        try:
+                            saida = datetime.strptime(f"{data_db} {saida_raw}", fmt)
+                            break
+                        except Exception:
+                            continue
+                    if saida and saida < entrada:
+                        saida += timedelta(days=1)
 
-                deducao_periodo = 0.0
-                minutos_brutos = 0.0
-                minutos_liquidos = 0.0
-
-                jornada_inicio = datetime.strptime(f"{data_db} {horario_oficial}", "%Y-%m-%d %H:%M")
-                atraso_minutos = max(0, (entrada - jornada_inicio).total_seconds() / 60)
-
-                if saida:
-                    minutos_brutos = max(0, (saida - entrada).total_seconds() / 60)
-                    deducao_periodo = calculate_deduction(atraso_minutos, setor)
-                    minutos_liquidos = max(0, minutos_brutos - deducao_periodo)
-                else:
-                    minutos_brutos = 0.0
-                    deducao_periodo = calculate_deduction(atraso_minutos, setor)
-                    minutos_liquidos = 0.0
+                minutos_brutos, minutos_liquidos, minutos_deducao = calculate_period_data(
+                    entrada, saida, data_db, turno_idx, setor, ignore_delay_flag=False
+                )
 
                 minutos_totais_brutos += minutos_brutos
-                minutos_totais_deducao += deducao_periodo
+                minutos_totais_deducao += minutos_deducao
+                minutos_totais_liquidos += minutos_liquidos
 
                 periodos.append({
                     "entrada": entrada.strftime("%Y-%m-%d %H:%M:%S") if entrada else None,
                     "saida": saida.strftime("%Y-%m-%d %H:%M:%S") if saida else None,
                     "minutos_brutos": format_minutes_to_hms(minutos_brutos),
-                    "deducao_minutos": format_minutes_to_hms(deducao_periodo),
+                    "deducao_minutos": format_minutes_to_hms(minutos_deducao),
                     "minutos_liquidos": format_minutes_to_hms(minutos_liquidos)
                 })
 
             desconto_manual_min = parse_hhmm_to_minutes(desconto_manual) if desconto_manual else 0
-
             if desconto_manual_min > 0 and periodos:
-                desconto_automatico_total = sum(parse_hhmm_to_minutes(p["deducao_minutos"]) for p in periodos)
-                diferenca = desconto_manual_min - desconto_automatico_total
+                desconto_auto_total = sum(parse_hhmm_to_minutes(p["deducao_minutos"]) for p in periodos)
+                diferenca = desconto_manual_min - desconto_auto_total
 
                 primeira_deducao = parse_hhmm_to_minutes(periodos[0]["deducao_minutos"])
                 nova_primeira_deducao = max(0, primeira_deducao + diferenca)
                 periodos[0]["deducao_minutos"] = format_minutes_to_hms(nova_primeira_deducao)
 
                 minutos_totais_deducao = 0.0
+                minutos_totais_liquidos = 0.0
                 for p in periodos:
-                    minutos_brutos_p = parse_hhmm_to_minutes(p["minutos_brutos"])
-                    minutos_deducao_p = parse_hhmm_to_minutes(p["deducao_minutos"])
-                    minutos_liquidos_p = max(0, minutos_brutos_p - minutos_deducao_p)
-
-                    p["minutos_liquidos"] = format_minutes_to_hms(minutos_liquidos_p)
-                    minutos_totais_deducao += minutos_deducao_p
-
-            minutos_totais_liquidos = 0.0
-            for p in periodos:
-                minutos_totais_liquidos += parse_hhmm_to_minutes(p["minutos_liquidos"])
+                    bruto_p = parse_hhmm_to_minutes(p["minutos_brutos"])
+                    deducao_p = parse_hhmm_to_minutes(p["deducao_minutos"])
+                    liquido_p = max(0, bruto_p - deducao_p)
+                    p["minutos_liquidos"] = format_minutes_to_hms(liquido_p)
+                    minutos_totais_deducao += deducao_p
+                    minutos_totais_liquidos += liquido_p
 
             self.db.insert_horas_trabalhadas({
                 "matricula": matricula,
@@ -4783,12 +5371,11 @@ class App:
                 "periodos": periodos
             }, justificativa=justificativa)
 
-            recalc_ok = self.db.recalculate_full_balance_for_employee(matricula)
+            recalc_ok = self.db.recalculate_full_balance_for_employee(matricula, recalc_from_date=data_db)
             if not recalc_ok:
                 raise Exception(f"Falha ao recalcular saldo do funcionário {matricula}")
 
             info_atualizada = self.db.get_funcionario_info(matricula)
-
             self.append_log(
                 f"Ajuste salvo para {matricula} em {data_db} | "
                 f"Bruto: {format_minutes_to_hms(minutos_totais_brutos)} | "
@@ -4797,13 +5384,11 @@ class App:
                 f"BH Atual: {format_minutes_to_hms(info_atualizada.get('banco_horas', 0) or 0)} | "
                 f"Extras: {int(info_atualizada.get('extras_disponiveis', 0) or 0)}"
             )
-
             return True
 
         except Exception as e:
             self.append_log(f"ERRO ao salvar ajuste manual de {matricula} em {data_db}: {e}")
             return False
-
 
     def commit_all_changes(self, from_exit=False):
             if self.editing_widgets: [w.event_generate('<FocusOut>') for k, w in self.editing_widgets.items() if k == 'entry']

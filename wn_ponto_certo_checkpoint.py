@@ -250,6 +250,7 @@ def calculate_period_data(entrada, saida, data_ref, turno_idx, sector, ignore_de
     return duration_bruto, duration_liquido, deduction_minutes
 
 # --- Classe DatabaseManager ---
+# --- Classe DatabaseManager ---
 class DatabaseManager:
     def __init__(self, db_path=None):
         self.db_path = str(db_path if db_path else DEFAULT_DB)
@@ -262,19 +263,57 @@ class DatabaseManager:
 
     def check_migrations(self):
         c = self.conn.cursor()
-        # Verifica ignorar_atraso
         try:
             c.execute("SELECT ignorar_atraso FROM horas_trabalhadas LIMIT 1")
         except sqlite3.OperationalError:
             c.execute("ALTER TABLE horas_trabalhadas ADD COLUMN ignorar_atraso INTEGER DEFAULT 0")
-        
-        # GARANTIA: Verifica se a matricula está na tabela de logs (comum dar erro aqui)
+
         try:
             c.execute("SELECT matricula FROM log_edicoes LIMIT 1")
         except sqlite3.OperationalError:
-            # Se não existir na log_edicoes, o erro "no such column" aparece ao gerar panorama
             c.execute("ALTER TABLE log_edicoes ADD COLUMN matricula TEXT")
-            
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS fechamento_diario (
+                id INTEGER PRIMARY KEY,
+                matricula TEXT NOT NULL,
+                data TEXT NOT NULL,
+                minutos_esperados REAL DEFAULT 0,
+                minutos_trabalhados REAL DEFAULT 0,
+                minutos_punicao REAL DEFAULT 0,
+                minutos_abono REAL DEFAULT 0,
+                minutos_atraso REAL DEFAULT 0,
+                saldo_dia REAL DEFAULT 0,
+                saldo_acumulado_bh REAL DEFAULT 0,
+                extras_acumuladas INTEGER DEFAULT 0,
+                checkpoint_base_id INTEGER,
+                status_fechado INTEGER DEFAULT 1,
+                atualizado_em DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(matricula, data)
+            )
+        """)
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS checkpoints_semanais (
+                id INTEGER PRIMARY KEY,
+                matricula TEXT NOT NULL,
+                data_checkpoint TEXT NOT NULL,
+                data_inicio_semana TEXT NOT NULL,
+                data_fim_semana TEXT NOT NULL,
+                minutos_base_bh REAL DEFAULT 0,
+                extras_base INTEGER DEFAULT 0,
+                minutos_trabalhados_semana REAL DEFAULT 0,
+                minutos_esperados_semana REAL DEFAULT 0,
+                minutos_punicoes_semana REAL DEFAULT 0,
+                minutos_abonos_semana REAL DEFAULT 0,
+                minutos_atraso_semana REAL DEFAULT 0,
+                saldo_semana REAL DEFAULT 0,
+                saldo_final_bh REAL DEFAULT 0,
+                extras_finais INTEGER DEFAULT 0,
+                gerado_em DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(matricula, data_checkpoint)
+            )
+        """)
         self.conn.commit()
 
     def toggle_ignore_delay(self, matricula, data_str):
@@ -418,6 +457,242 @@ class DatabaseManager:
                 messagebox.showwarning("Atenção", "Nenhuma data definida. Cálculos retroativos podem gerar saldos inesperados.")
 
 
+
+
+    def get_system_start_date(self):
+        global SYSTEM_START_DATE
+        c = self.conn.cursor()
+        c.execute("SELECT valor FROM configuracoes WHERE chave = 'data_inicio_sistema'")
+        row = c.fetchone()
+        valor = row['valor'] if row and row['valor'] else SYSTEM_START_DATE
+        valor = str(valor).strip()
+        try:
+            dt = datetime.strptime(valor, "%Y-%m-%d").date()
+        except Exception:
+            try:
+                dt = datetime.strptime(valor, "%d/%m/%Y").date()
+                valor = dt.strftime("%Y-%m-%d")
+                c.execute("UPDATE configuracoes SET valor = ? WHERE chave = 'data_inicio_sistema'", (valor,))
+                self.conn.commit()
+            except Exception:
+                dt = datetime.strptime("2025-01-01", "%Y-%m-%d").date()
+                valor = "2025-01-01"
+        SYSTEM_START_DATE = valor
+        return dt
+
+    def get_last_checkpoint_before(self, matricula, target_date):
+        target_str = target_date.isoformat() if isinstance(target_date, date) else str(target_date)
+        c = self.conn.cursor()
+        c.execute(
+            """
+            SELECT * FROM checkpoints_semanais
+            WHERE matricula = ? AND data_checkpoint <= ?
+            ORDER BY data_checkpoint DESC, id DESC
+            LIMIT 1
+            """,
+            (matricula, target_str)
+        )
+        row = c.fetchone()
+        return dict(row) if row else None
+
+    def ensure_daily_rows_until(self, matricula, end_date=None):
+        if isinstance(end_date, date):
+            end_date_obj = end_date
+        elif isinstance(end_date, str) and end_date:
+            end_date_obj = datetime.strptime(end_date, "%Y-%m-%d").date()
+        else:
+            end_date_obj = date.today()
+        start_dt = self.get_system_start_date()
+        if end_date_obj < start_dt:
+            return 0
+        created = 0
+        with self.conn:
+            current = start_dt
+            while current <= end_date_obj:
+                cur = self.conn.execute(
+                    """
+                    INSERT OR IGNORE INTO fechamento_diario (
+                        matricula, data, minutos_esperados, minutos_trabalhados, minutos_punicao,
+                        minutos_abono, minutos_atraso, saldo_dia, saldo_acumulado_bh,
+                        extras_acumuladas, checkpoint_base_id, status_fechado
+                    ) VALUES (?, ?, 0, 0, 0, 0, 0, 0, 0, 0, NULL, 1)
+                    """,
+                    (matricula, current.isoformat())
+                )
+                if cur.rowcount:
+                    created += 1
+                current += timedelta(days=1)
+        return created
+
+    def _get_processing_end_date_for_employee(self, matricula):
+        c = self.conn.cursor()
+        dates = [self.get_system_start_date(), date.today()]
+        for table, field in (("horas_trabalhadas", "data"), ("punicoes", "data_punicao"), ("abonos", "data")):
+            c.execute(f"SELECT MAX({field}) as d FROM {table} WHERE matricula = ?", (matricula,))
+            row = c.fetchone()
+            if row and row['d']:
+                try:
+                    dates.append(datetime.strptime(row['d'], "%Y-%m-%d").date())
+                except Exception:
+                    pass
+        return max(dates)
+
+    def _build_daily_closure(self, matricula, data_str, saldo_base_bh, extras_base, checkpoint_base_id=None):
+        func_info = self.get_funcionario_info(matricula)
+        is_fichado = func_info.get('fichado', 0) == 1
+        expected = float(self.get_expected_daily_minutes(data_str, is_fichado, matricula) or 0)
+        c = self.conn.cursor()
+        c.execute("SELECT minutos_totais, periodos FROM horas_trabalhadas WHERE matricula = ? AND data = ?", (matricula, data_str))
+        row = c.fetchone()
+        worked = parse_hhmm_to_minutes(row['minutos_totais']) if row and row['minutos_totais'] else 0.0
+        atraso = 0.0
+        if row and row['periodos']:
+            try:
+                periodos = json.loads(row['periodos'])
+                for p in periodos:
+                    atraso += parse_hhmm_to_minutes(p.get('deducao_minutos', '00:00:00'))
+            except Exception:
+                pass
+        punicao = float(self.get_total_punishment_minutes_for_day(matricula, data_str) or 0)
+        abono = float(self.get_abono_minutes_for_day(matricula, data_str) or 0)
+        saldo_dia = float(worked - expected - punicao + abono)
+        saldo_final_bh = float(saldo_base_bh + saldo_dia)
+        extras_finais = int(extras_base)
+        while saldo_final_bh >= MINUTOS_UNIDADE_EXTRA:
+            saldo_final_bh -= MINUTOS_UNIDADE_EXTRA
+            extras_finais += 1
+        while saldo_final_bh < 0 and extras_finais > 0:
+            saldo_final_bh += MINUTOS_UNIDADE_EXTRA
+            extras_finais -= 1
+        return {
+            'matricula': matricula,
+            'data': data_str,
+            'minutos_esperados': expected,
+            'minutos_trabalhados': worked,
+            'minutos_punicao': punicao,
+            'minutos_abono': abono,
+            'minutos_atraso': atraso,
+            'saldo_dia': saldo_dia,
+            'saldo_acumulado_bh': saldo_final_bh,
+            'extras_acumuladas': extras_finais,
+            'checkpoint_base_id': checkpoint_base_id,
+        }
+
+    def generate_weekly_checkpoint(self, matricula, saturday_date):
+        saturday_obj = saturday_date if isinstance(saturday_date, date) else datetime.strptime(str(saturday_date), "%Y-%m-%d").date()
+        week_start = saturday_obj - timedelta(days=5)
+        c = self.conn.cursor()
+        c.execute(
+            """
+            SELECT * FROM fechamento_diario
+            WHERE matricula = ? AND data BETWEEN ? AND ?
+            ORDER BY data ASC
+            """,
+            (matricula, week_start.isoformat(), saturday_obj.isoformat())
+        )
+        rows = [dict(r) for r in c.fetchall()]
+        if not rows:
+            return False
+        prev_checkpoint = self.get_last_checkpoint_before(matricula, week_start - timedelta(days=1))
+        func_info = self.get_funcionario_info(matricula)
+        base_bh = float(prev_checkpoint['saldo_final_bh']) if prev_checkpoint else float(func_info.get('banco_horas_inicial', 0) or 0)
+        base_extras = int(prev_checkpoint['extras_finais']) if prev_checkpoint else int(func_info.get('extras_disponiveis_inicial', 0) or 0)
+        minutos_trabalhados_semana = sum(float(r.get('minutos_trabalhados', 0) or 0) for r in rows)
+        minutos_esperados_semana = sum(float(r.get('minutos_esperados', 0) or 0) for r in rows)
+        minutos_punicoes_semana = sum(float(r.get('minutos_punicao', 0) or 0) for r in rows)
+        minutos_abonos_semana = sum(float(r.get('minutos_abono', 0) or 0) for r in rows)
+        minutos_atraso_semana = sum(float(r.get('minutos_atraso', 0) or 0) for r in rows)
+        saldo_semana = sum(float(r.get('saldo_dia', 0) or 0) for r in rows)
+        saldo_final_bh = float(rows[-1]['saldo_acumulado_bh'])
+        extras_finais = int(rows[-1]['extras_acumuladas'])
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT OR REPLACE INTO checkpoints_semanais (
+                    matricula, data_checkpoint, data_inicio_semana, data_fim_semana,
+                    minutos_base_bh, extras_base, minutos_trabalhados_semana,
+                    minutos_esperados_semana, minutos_punicoes_semana, minutos_abonos_semana,
+                    minutos_atraso_semana, saldo_semana, saldo_final_bh, extras_finais
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    matricula, saturday_obj.isoformat(), week_start.isoformat(), saturday_obj.isoformat(),
+                    base_bh, base_extras, minutos_trabalhados_semana, minutos_esperados_semana,
+                    minutos_punicoes_semana, minutos_abonos_semana, minutos_atraso_semana,
+                    saldo_semana, saldo_final_bh, extras_finais
+                )
+            )
+        return True
+
+    def process_range_from_last_checkpoint(self, matricula, end_date=None):
+        if isinstance(end_date, date):
+            end_dt = end_date
+        elif isinstance(end_date, str) and end_date:
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+        else:
+            end_dt = self._get_processing_end_date_for_employee(matricula)
+        self.ensure_daily_rows_until(matricula, end_dt)
+        last_checkpoint = self.get_last_checkpoint_before(matricula, end_dt)
+        func_info = self.get_funcionario_info(matricula)
+        if last_checkpoint:
+            start_dt = datetime.strptime(last_checkpoint['data_checkpoint'], "%Y-%m-%d").date() + timedelta(days=1)
+            saldo_base_bh = float(last_checkpoint['saldo_final_bh'] or 0)
+            extras_base = int(last_checkpoint['extras_finais'] or 0)
+            checkpoint_base_id = last_checkpoint['id']
+        else:
+            start_dt = self.get_system_start_date()
+            saldo_base_bh = float(func_info.get('banco_horas_inicial', 0) or 0)
+            extras_base = int(func_info.get('extras_disponiveis_inicial', 0) or 0)
+            checkpoint_base_id = None
+        if end_dt < start_dt:
+            with self.conn:
+                self.conn.execute("UPDATE funcionarios SET banco_horas = ?, extras_disponiveis = ? WHERE matricula = ?", (saldo_base_bh, extras_base, matricula))
+            return True
+        current = start_dt
+        with self.conn:
+            while current <= end_dt:
+                closure = self._build_daily_closure(matricula, current.isoformat(), saldo_base_bh, extras_base, checkpoint_base_id)
+                self.conn.execute(
+                    """
+                    INSERT OR REPLACE INTO fechamento_diario (
+                        matricula, data, minutos_esperados, minutos_trabalhados, minutos_punicao,
+                        minutos_abono, minutos_atraso, saldo_dia, saldo_acumulado_bh,
+                        extras_acumuladas, checkpoint_base_id, status_fechado, atualizado_em
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+                    """,
+                    (
+                        closure['matricula'], closure['data'], closure['minutos_esperados'], closure['minutos_trabalhados'],
+                        closure['minutos_punicao'], closure['minutos_abono'], closure['minutos_atraso'], closure['saldo_dia'],
+                        closure['saldo_acumulado_bh'], closure['extras_acumuladas'], closure['checkpoint_base_id']
+                    )
+                )
+                saldo_base_bh = closure['saldo_acumulado_bh']
+                extras_base = closure['extras_acumuladas']
+                if current.weekday() == 5:
+                    self.generate_weekly_checkpoint(matricula, current)
+                    fresh_checkpoint = self.get_last_checkpoint_before(matricula, current)
+                    if fresh_checkpoint:
+                        saldo_base_bh = float(fresh_checkpoint['saldo_final_bh'] or saldo_base_bh)
+                        extras_base = int(fresh_checkpoint['extras_finais'] or extras_base)
+                        checkpoint_base_id = fresh_checkpoint['id']
+                current += timedelta(days=1)
+            self.conn.execute("UPDATE funcionarios SET banco_horas = ?, extras_disponiveis = ? WHERE matricula = ?", (saldo_base_bh, extras_base, matricula))
+        return True
+
+    def recalculate_full_balance_for_employee(self, matricula):
+        try:
+            matricula = str(matricula).split(" - ")[0].strip()
+            end_dt = self._get_processing_end_date_for_employee(matricula)
+            self.ensure_daily_rows_until(matricula, end_dt)
+            self.process_range_from_last_checkpoint(matricula, end_dt)
+            return True
+        except Exception as e:
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
+            print(f"Erro em recalculate_full_balance_for_employee({matricula}): {e}")
+            return False
 
     def populate_fixed_holidays(self):
         fixed_holidays = [
