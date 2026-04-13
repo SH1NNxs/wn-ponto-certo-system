@@ -5132,7 +5132,7 @@ class App:
                 ["Carga Trabalhada no Período:", format_minutes_to_hms(total_trabalhado_min)],
                 ["Saldo Atual Banco de Horas:", format_minutes_to_hms(saldo_bh_atual_min)],
                 ["BH no início do último dia:", format_minutes_to_hms(sugestao_ref['bh_inicio'])],
-                ["Sugestão de Saída (Último dia do filtro):", msg_saida]
+                ["Horário de saída", msg_saida]
             ]
 
             t_det = Table(detalhes_data, colWidths=[8*cm, 6*cm], hAlign='CENTER')
