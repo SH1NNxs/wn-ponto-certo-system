@@ -18,7 +18,7 @@ import subprocess
 import tempfile
 
 # --- CONFIGURAÇÕES GLOBAIS ---
-CURRENT_VERSION = "v1.3.2"
+CURRENT_VERSION = "v1.3.4"
 SYSTEM_CURRENT_DATE = date.today()
 SYSTEM_START_DATE = "2026-03-09"
 

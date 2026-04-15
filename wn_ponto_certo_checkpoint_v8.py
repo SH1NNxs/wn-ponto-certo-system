@@ -18,7 +18,7 @@ import subprocess
 import tempfile
 
 # --- VERSÃO ATUAL ---
-CURRENT_VERSION = "v1.3.1"
+CURRENT_VERSION = "v1.3.3"
 
 # Define a data atual para referência dos cálculos de saldo
 SYSTEM_CURRENT_DATE = date.today()
@@ -100,9 +100,9 @@ def create_database(self):
                     self.conn.commit()
                     SYSTEM_START_DATE = data_iso
                 except:
-                    SYSTEM_START_DATE = "2025-04-06"
+                    SYSTEM_START_DATE = "2025-04-13"
             else:
-                SYSTEM_START_DATE = "2025-04-06"
+                SYSTEM_START_DATE = "2025-04-13"
         else:
             # ESSENCIAL: Atualiza a variável global com o que está no banco
             SYSTEM_START_DATE = config_data['valor']
@@ -500,7 +500,7 @@ class DatabaseManager:
 
         final_date = cfg_date
         if final_date is None:
-            final_date = earliest_found or datetime.strptime("2025-01-01", "%Y-%m-%d").date()
+            final_date = earliest_found or datetime.strptime("2026-04-13", "%Y-%m-%d").date()
 
         if earliest_found and final_date > earliest_found:
             final_date = earliest_found
