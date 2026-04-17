@@ -4,7 +4,7 @@ import subprocess
 import sys
 
 # --- Configurações ---
-SCRIPT_PRINCIPAL = "wn_ponto_certo.py"
+SCRIPT_PRINCIPAL = "wn_ponto_certo_checkpoint_v8.py"
 NOME_DO_EXE = "WN-Ponto-Certo"
 ICONE = "wn_logo.ico"
 RECURSOS = [

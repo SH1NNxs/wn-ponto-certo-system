@@ -18,7 +18,7 @@ import subprocess
 import tempfile
 
 # --- VERSÃO ATUAL ---
-CURRENT_VERSION = "v1.3.3"
+CURRENT_VERSION = "v1.3.4"
 
 # Define a data atual para referência dos cálculos de saldo
 SYSTEM_CURRENT_DATE = date.today()
