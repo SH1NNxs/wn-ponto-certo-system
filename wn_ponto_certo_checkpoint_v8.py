@@ -18,13 +18,13 @@ import subprocess
 import tempfile
 
 # --- VERSÃO ATUAL ---
-CURRENT_VERSION = "v1.3.4"
+CURRENT_VERSION = "v1.3.5"
 
 # Define a data atual para referência dos cálculos de saldo
 SYSTEM_CURRENT_DATE = date.today()
 
 # Inicializa o Marco Zero do sistema (será atualizado pelo banco de dados)
-SYSTEM_START_DATE = "2025-04-06"
+SYSTEM_START_DATE = "2026-05-04"
 
 # Tenta importar bibliotecas necessárias
 try:
@@ -100,9 +100,9 @@ def create_database(self):
                     self.conn.commit()
                     SYSTEM_START_DATE = data_iso
                 except:
-                    SYSTEM_START_DATE = "2025-04-13"
+                    SYSTEM_START_DATE = "2026-05-04"
             else:
-                SYSTEM_START_DATE = "2025-04-13"
+                SYSTEM_START_DATE = "2026-05-04"
         else:
             # ESSENCIAL: Atualiza a variável global com o que está no banco
             SYSTEM_START_DATE = config_data['valor']
@@ -2093,7 +2093,7 @@ def import_glog_txt(filepath, db_manager, logger=print):
     try:
         start_dt = db_manager.get_system_start_date() if hasattr(db_manager, 'get_system_start_date') else datetime.strptime(SYSTEM_START_DATE, "%Y-%m-%d").date()
     except Exception:
-        start_dt = datetime.strptime("2025-01-01", "%Y-%m-%d").date()
+        start_dt = datetime.strptime("2026-05-04", "%Y-%m-%d").date()
 
     try:
         with open(filepath, 'r', encoding='utf-8-sig', errors='ignore') as f:
